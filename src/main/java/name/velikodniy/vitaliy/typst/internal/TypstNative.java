@@ -121,6 +121,8 @@ public final class TypstNative {
 
     /**
      * Free a Typst engine.
+     *
+     * @param enginePtr pointer to the engine to free
      */
     public static void engineFree(MemorySegment enginePtr) {
         try {
@@ -133,6 +135,9 @@ public final class TypstNative {
     /**
      * Add a font from raw byte data.
      *
+     * @param arena     arena for allocating the font buffer
+     * @param enginePtr pointer to the engine
+     * @param fontData  raw font bytes
      * @return 0 on success, negative on error
      */
     public static int addFont(Arena arena, MemorySegment enginePtr, byte[] fontData) {
@@ -148,6 +153,9 @@ public final class TypstNative {
     /**
      * Add all fonts from a directory.
      *
+     * @param arena     arena for allocating the path string
+     * @param enginePtr pointer to the engine
+     * @param path      path to the font directory
      * @return 0 on success, negative on error
      */
     public static int addFontDir(Arena arena, MemorySegment enginePtr, String path) {
@@ -188,6 +196,7 @@ public final class TypstNative {
     /**
      * Check if a compilation result is successful.
      *
+     * @param resultPtr pointer to the compilation result
      * @return true if success
      */
     public static boolean resultIsOk(MemorySegment resultPtr) {
@@ -201,6 +210,8 @@ public final class TypstNative {
     /**
      * Get the PDF bytes from a successful result.
      *
+     * @param arena     arena for allocating the output length buffer
+     * @param resultPtr pointer to the compilation result
      * @return PDF byte array, or null if error result
      */
     public static byte[] resultPdf(Arena arena, MemorySegment resultPtr) {
@@ -220,6 +231,9 @@ public final class TypstNative {
 
     /**
      * Get the errors JSON string from a result.
+     *
+     * @param resultPtr pointer to the compilation result
+     * @return JSON array string of error diagnostics
      */
     public static String resultErrors(MemorySegment resultPtr) {
         try {
@@ -233,6 +247,9 @@ public final class TypstNative {
 
     /**
      * Get the warnings JSON string from a result.
+     *
+     * @param resultPtr pointer to the compilation result
+     * @return JSON array string of warning diagnostics
      */
     public static String resultWarnings(MemorySegment resultPtr) {
         try {
@@ -246,6 +263,8 @@ public final class TypstNative {
 
     /**
      * Free a compilation result.
+     *
+     * @param resultPtr pointer to the result to free
      */
     public static void resultFree(MemorySegment resultPtr) {
         try {
@@ -257,6 +276,10 @@ public final class TypstNative {
 
     /**
      * Invalidate a specific cached template.
+     *
+     * @param arena     arena for allocating the key string
+     * @param enginePtr pointer to the engine
+     * @param key       the template cache key to invalidate
      */
     public static void invalidateTemplate(Arena arena, MemorySegment enginePtr, String key) {
         try {
@@ -269,6 +292,8 @@ public final class TypstNative {
 
     /**
      * Invalidate all cached templates.
+     *
+     * @param enginePtr pointer to the engine
      */
     public static void invalidateAll(MemorySegment enginePtr) {
         try {

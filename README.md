@@ -168,7 +168,7 @@ try {
 Exception hierarchy:
 
 | Exception | When |
-|—-|—-|
+|---|---|
 | `TypstCompilationException` | Template compilation errors (with structured diagnostics) |
 | `TypstEngineException` | Configuration errors (bad font, missing directory, closed engine) |
 | `TypstNativeException` | Native library loading or FFI call failures |
@@ -176,7 +176,7 @@ Exception hierarchy:
 ### Data Type Mapping
 
 | Java Type | JSON Representation |
-|—-|—-|
+|---|---|
 | `String` | `"string"` |
 | `int`, `long`, `double` | number literal |
 | `boolean` | `true` / `false` |
@@ -239,12 +239,12 @@ TypstNative (Java FFM API bindings)
     v
 libtypst_java.so/dylib/dll (Rust shared library)
     |
-    |—- Typst compiler (typst 0.13)
-    |—- PDF exporter (typst-pdf 0.13)
-    |—- Font book (typst-assets, embedded)
-    |—- Template cache (RwLock<HashMap>)
-    |—- Virtual filesystem (data.json injection)
-    |—- Package resolver (packages.typst.org)
+    |--- Typst compiler (typst 0.13)
+    |--- PDF exporter (typst-pdf 0.13)
+    |--- Font book (typst-assets, embedded)
+    |--- Template cache (RwLock<HashMap>)
+    |--- Virtual filesystem (data.json injection)
+    |--- Package resolver (packages.typst.org)
 ```
 
 ## Building from Source
@@ -262,7 +262,7 @@ mvn clean verify
 ```
 
 This will:
-1. Compile the Rust native library (`cargo build —release`)
+1. Compile the Rust native library (`cargo build --release`)
 2. Copy it to the classpath
 3. Run Rust tests (`cargo test`)
 4. Compile Java sources
@@ -277,7 +277,7 @@ This will:
 ## Supported Platforms
 
 | OS | Architecture | Status |
-|—-|—-|—-|
+|---|---|---|
 | Linux | x86_64 | Supported |
 | Linux | aarch64 | Supported |
 | macOS | x86_64 | Supported |

@@ -39,6 +39,8 @@ public final class TypstEngine implements AutoCloseable {
 
     /**
      * Create a new builder for configuring a TypstEngine.
+     *
+     * @return a new Builder instance
      */
     public static Builder builder() {
         return new Builder();

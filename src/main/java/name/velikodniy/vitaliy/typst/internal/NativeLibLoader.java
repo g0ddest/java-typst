@@ -11,11 +11,19 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Loads the typst-java native library from the classpath or a development build directory.
+ */
 public final class NativeLibLoader {
     private static final AtomicReference<SymbolLookup> LOOKUP = new AtomicReference<>();
 
     private NativeLibLoader() {}
 
+    /**
+     * Load the native library and return a {@link SymbolLookup} for its symbols.
+     *
+     * @return the symbol lookup for the loaded native library
+     */
     public static SymbolLookup load() {
         SymbolLookup existing = LOOKUP.get();
         if (existing != null) return existing;

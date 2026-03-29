@@ -10,6 +10,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.AbstractMap;
 
 /**
  * Custom JSON serializer for Java objects. No external dependencies.
@@ -24,6 +25,9 @@ public final class DataSerializer {
 
     /**
      * Serialize any Java object to a JSON string.
+     *
+     * @param value the object to serialize (may be null)
+     * @return the JSON string representation
      */
     public static String toJson(Object value) {
         var sb = new StringBuilder();
@@ -186,7 +190,7 @@ public final class DataSerializer {
             if (fieldName != null) {
                 try {
                     Object val = method.invoke(pojo);
-                    entries.add(Map.entry(fieldName, val));
+                    entries.add(new AbstractMap.SimpleEntry<>(fieldName, val));
                 } catch (Exception e) {
                     throw new TypstEngineException("Failed to invoke getter: " + name, e);
                 }
@@ -197,12 +201,16 @@ public final class DataSerializer {
 
     /**
      * Builder for merging multiple data sources into a single JSON object.
+     * Supports key-value pairs, records, and raw JSON strings.
      */
     public static final class Builder {
         private final LinkedHashMap<String, Object> data = new LinkedHashMap<>();
 
         /**
          * Add a key-value pair. Last write wins on conflict.
+         *
+         * @param key   the JSON field name
+         * @param value the value to serialize
          */
         public void put(String key, Object value) {
             data.put(key, value);
@@ -210,6 +218,8 @@ public final class DataSerializer {
 
         /**
          * Expand a record's components as top-level keys.
+         *
+         * @param record the Java record whose components are merged into this builder
          */
         public void putRecord(Object record) {
             if (!record.getClass().isRecord()) {
@@ -231,6 +241,8 @@ public final class DataSerializer {
         /**
          * Parse top-level keys from a raw JSON object string and merge them.
          * Only supports flat or nested JSON objects at the top level.
+         *
+         * @param json the raw JSON object string to parse and merge
          */
         public void putRawJson(String json) {
             // Minimal JSON object parser: extract top-level key-value pairs
@@ -283,6 +295,8 @@ public final class DataSerializer {
 
         /**
          * Serialize merged data as a JSON object.
+         *
+         * @return the merged JSON object string
          */
         public String toJson() {
             var sb = new StringBuilder();
@@ -364,10 +378,44 @@ public final class DataSerializer {
             throw new IllegalArgumentException("Unterminated " + open);
         }
 
+        private static String unescapeJsonString(String s) {
+            if (s.indexOf('\\') < 0) return s;
+            var sb = new StringBuilder(s.length());
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                if (c == '\\' && i + 1 < s.length()) {
+                    char next = s.charAt(++i);
+                    switch (next) {
+                        case '"'  -> sb.append('"');
+                        case '\\' -> sb.append('\\');
+                        case '/'  -> sb.append('/');
+                        case 'n'  -> sb.append('\n');
+                        case 'r'  -> sb.append('\r');
+                        case 't'  -> sb.append('\t');
+                        case 'b'  -> sb.append('\b');
+                        case 'f'  -> sb.append('\f');
+                        case 'u'  -> {
+                            if (i + 4 < s.length()) {
+                                String hex = s.substring(i + 1, i + 5);
+                                sb.append((char) Integer.parseInt(hex, 16));
+                                i += 4;
+                            } else {
+                                sb.append('\\').append('u');
+                            }
+                        }
+                        default -> sb.append('\\').append(next);
+                    }
+                } else {
+                    sb.append(c);
+                }
+            }
+            return sb.toString();
+        }
+
         private static Object parseJsonValue(String raw) {
             if (raw.startsWith("\"")) {
                 // String — remove quotes and unescape
-                return raw.substring(1, raw.length() - 1);
+                return unescapeJsonString(raw.substring(1, raw.length() - 1));
             } else if (raw.equals("null")) {
                 return null;
             } else if (raw.equals("true")) {

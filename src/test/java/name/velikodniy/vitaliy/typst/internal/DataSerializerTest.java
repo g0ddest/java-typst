@@ -80,6 +80,12 @@ class DataSerializerTest {
             assertTrue(json.contains("\"name\":\"hello\""));
             assertTrue(json.contains("\"value\":42"));
         }
+        @Test void serializesPojoWithNullGetter() {
+            var pojo = new TestPojo(null, 42);
+            String json = DataSerializer.toJson(pojo);
+            assertTrue(json.contains("\"name\":null"));
+            assertTrue(json.contains("\"value\":42"));
+        }
     }
 
     public static class TestPojo {
@@ -113,6 +119,13 @@ class DataSerializerTest {
             var b = new DataSerializer.Builder(); b.putRawJson("{\"a\":1,\"b\":2}"); b.put("c", 3);
             String json = b.toJson();
             assertTrue(json.contains("\"a\":1")); assertTrue(json.contains("\"b\":2")); assertTrue(json.contains("\"c\":3"));
+        }
+        @Test void mergesRawJsonWithEscapes() {
+            var b = new DataSerializer.Builder();
+            b.putRawJson("{\"msg\":\"hello\\nworld\",\"path\":\"c:\\\\dir\"}");
+            String json = b.toJson();
+            assertTrue(json.contains("\"msg\":\"hello\\nworld\""));
+            assertTrue(json.contains("\"path\":\"c:\\\\dir\""));
         }
     }
 
