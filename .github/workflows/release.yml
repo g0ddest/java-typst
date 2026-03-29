@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  release:
+    types: [ created ]
+
+jobs:
+  build-native:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: libtypst_java.so
+            platform: linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: libtypst_java.so
+            platform: linux-aarch64
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: libtypst_java.dylib
+            platform: macos-x86_64
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: libtypst_java.dylib
+            platform: macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: typst_java.dll
+            platform: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux aarch64)
+        if: ${{ matrix.platform == 'linux-aarch64' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build native library (release)
+        working-directory: native
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.platform == 'linux-aarch64' && 'aarch64-linux-gnu-gcc' || '' }}
+
+      - name: Run Rust tests
+        if: ${{ !matrix.cross }}
+        working-directory: native
+        run: cargo test
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: native/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  publish:
+    needs: build-native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: 25
+          distribution: oracle
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: native-libs
+
+      - name: Arrange native libraries into classpath structure
+        run: |
+          mkdir -p src/main/resources/native/linux-x86_64
+          mkdir -p src/main/resources/native/linux-aarch64
+          mkdir -p src/main/resources/native/macos-x86_64
+          mkdir -p src/main/resources/native/macos-aarch64
+          mkdir -p src/main/resources/native/windows-x86_64
+          cp native-libs/native-linux-x86_64/libtypst_java.so   src/main/resources/native/linux-x86_64/
+          cp native-libs/native-linux-aarch64/libtypst_java.so   src/main/resources/native/linux-aarch64/
+          cp native-libs/native-macos-x86_64/libtypst_java.dylib src/main/resources/native/macos-x86_64/
+          cp native-libs/native-macos-aarch64/libtypst_java.dylib src/main/resources/native/macos-aarch64/
+          cp native-libs/native-windows-x86_64/typst_java.dll    src/main/resources/native/windows-x86_64/
+
+      - name: Set version from tag
+        run: mvn versions:set -DnewVersion=${GITHUB_REF_NAME#v} -B -q
+
+      - name: Deploy to Maven Central
+        run: mvn clean deploy -Prelease -Dexec.skip=true -B
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
