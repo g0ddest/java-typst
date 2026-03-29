@@ -6,7 +6,7 @@
 
     <groupId>name.velikodniy.vitaliy</groupId>
     <artifactId>typst-java</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
 
     <name>typst-java</name>
     <description>Typst PDF generation library for Java 25+</description>
