@@ -26,10 +26,10 @@ fn diagnostic_to_json(diag: &SourceDiagnostic, world: &dyn World) -> serde_json:
     let (file, line, column) = if let Some(id) = diag.span.id() {
         let file_path = id.vpath().as_rooted_path().display().to_string();
         if let Ok(source) = world.source(id) {
-            // Try to get position from span range
-            if let Some(range) = world.range(diag.span) {
-                let line = source.byte_to_line(range.start).unwrap_or(0);
-                let col = source.byte_to_column(range.start).unwrap_or(0);
+            if let Some(range) = source.range(diag.span) {
+                let lines = source.lines();
+                let line = lines.byte_to_line(range.start).unwrap_or(0);
+                let col = lines.byte_to_column(range.start).unwrap_or(0);
                 (file_path, line + 1, col + 1) // 1-based
             } else {
                 (file_path, 0, 0)
@@ -63,5 +63,3 @@ fn diagnostic_to_json(diag: &SourceDiagnostic, world: &dyn World) -> serde_json:
         "hint": hints,
     })
 }
-
-use typst::WorldExt;
