@@ -1,8 +1,10 @@
 package name.velikodniy.vitaliy.typst;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,7 +44,7 @@ final class PdfAssert {
         byte[] normalizedExpected = stripVariables(expected);
         byte[] normalizedActual = stripVariables(actual);
 
-        if (java.util.Arrays.equals(normalizedExpected, normalizedActual)) {
+        if (Arrays.equals(normalizedExpected, normalizedActual)) {
             return; // identical
         }
 
@@ -105,7 +107,7 @@ final class PdfAssert {
     static byte[] stripVariables(byte[] pdf) {
         // Work with the raw bytes as a string for regex matching
         // PDF is mostly ASCII with some binary streams
-        String content = new String(pdf, java.nio.charset.StandardCharsets.ISO_8859_1);
+        String content = new String(pdf, StandardCharsets.ISO_8859_1);
 
         // Replace /CreationDate (D:20260329152955+03'00')  →  /CreationDate (D:00000000000000+00'00')
         content = replacePattern(content,

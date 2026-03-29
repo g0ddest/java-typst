@@ -206,6 +206,9 @@ public final class DataSerializer {
     public static final class Builder {
         private final LinkedHashMap<String, Object> data = new LinkedHashMap<>();
 
+        /** Creates a new empty builder. */
+        public Builder() {}
+
         /**
          * Add a key-value pair. Last write wins on conflict.
          *

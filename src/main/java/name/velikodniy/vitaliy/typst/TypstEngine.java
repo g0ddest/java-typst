@@ -7,7 +7,9 @@ import java.io.InputStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -130,7 +132,7 @@ public final class TypstEngine implements AutoCloseable {
      */
     public static final class Builder {
         private boolean templateCacheEnabled = true;
-        private final java.util.List<FontSource> fontSources = new java.util.ArrayList<>();
+        private final List<FontSource> fontSources = new ArrayList<>();
 
         private Builder() {}
 

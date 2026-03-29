@@ -2,6 +2,8 @@ package name.velikodniy.vitaliy.typst;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class TypstCacheTest {
@@ -30,7 +32,7 @@ class TypstCacheTest {
             // Content differs — normalized PDFs should NOT be equal
             byte[] n1 = PdfAssert.stripVariables(pdf1);
             byte[] n2 = PdfAssert.stripVariables(pdf2);
-            assertFalse(java.util.Arrays.equals(n1, n2),
+            assertFalse(Arrays.equals(n1, n2),
                     "Different data should produce different PDFs");
         }
     }
