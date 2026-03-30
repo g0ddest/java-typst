@@ -29,6 +29,14 @@ Renders Typst templates into PDF documents via an embedded native Typst compiler
 </dependency>
 ```
 
+### JVM Flag (optional)
+
+The library uses Java FFM API for native calls. Without this flag everything works, but the JVM prints a warning. It will become required in future Java versions:
+
+```
+java --enable-native-access=ALL-UNNAMED -jar myapp.jar
+```
+
 ### Basic Usage
 
 ```java
@@ -46,7 +54,7 @@ Create a Typst template `invoice.typ`:
 ```typst
 #let data = json("data.json")
 
-= Invoice ##data.number
+= Invoice #data.number
 
 *Customer:* #data.customer.name \
 *Date:* #data.date
@@ -55,9 +63,9 @@ Create a Typst template `invoice.typ`:
   columns: (1fr, auto, auto),
   table.header([*Item*], [*Qty*], [*Price*]),
   ..data.items.map(item => (
-    item.name,
-    str(item.qty),
-    str(item.price),
+    [#item.name],
+    [#str(item.qty)],
+    [#str(item.price)],
   )).flatten()
 )
 
@@ -209,7 +217,7 @@ Templates are standard Typst files. Data is injected via a virtual `data.json` f
 // Tables
 #table(
   columns: (auto, auto),
-  ..data.rows.map(r => (r.key, r.value)).flatten()
+  ..data.rows.map(r => ([#r.key], [#r.value])).flatten()
 )
 
 // Conditionals
@@ -271,6 +279,7 @@ This will:
 ## Requirements
 
 - **Java 25+** (uses stable FFM API from JEP 454)
+- **JVM flag** `--enable-native-access=ALL-UNNAMED` (optional now, suppresses warning)
 - **No Rust needed at runtime** — native library is bundled in the JAR
 - **No Typst installation needed** — compiler is embedded
 
