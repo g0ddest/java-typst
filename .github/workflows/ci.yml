@@ -67,7 +67,7 @@ jobs:
       - name: Run Rust tests
         if: ${{ !matrix.cross }}
         working-directory: native
-        run: cargo test
+        run: cargo test --release --target ${{ matrix.target }}
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
@@ -79,7 +79,13 @@ jobs:
     needs: build-native
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: macos-latest
+            platform: macos-aarch64
+          - os: windows-latest
+            platform: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -90,27 +96,16 @@ jobs:
           distribution: oracle
           cache: maven
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - name: Download native library
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            native/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('native/Cargo.lock') }}
-
-      - name: Build native library for current platform
-        working-directory: native
-        run: cargo build --release
+          name: native-${{ matrix.platform }}
+          path: target/classes/native/${{ matrix.platform }}
 
       - name: Run Java tests
-        run: mvn test -B
+        run: mvn test -B -Dexec.skip=true
 
   quality-gate:
-    if: github.event_name == 'pull_request'
     needs: [ build-native, test-java ]
     runs-on: ubuntu-latest
     steps:
@@ -124,12 +119,11 @@ jobs:
           distribution: oracle
           cache: maven
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build native library
-        working-directory: native
-        run: cargo build --release
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: target/classes/native/linux-x86_64
 
       - name: Cache SonarCloud packages
         uses: actions/cache@v4
@@ -144,7 +138,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: >-
-          mvn clean verify sonar:sonar -B
+          mvn verify sonar:sonar -B
+          -Dexec.skip=true
           -Dsonar.projectKey=${{ github.repository_owner }}_typst-java
           -Dsonar.organization=${{ github.repository_owner }}
           -Dsonar.host.url=https://sonarcloud.io
