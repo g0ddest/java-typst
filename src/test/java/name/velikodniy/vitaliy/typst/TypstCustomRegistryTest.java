@@ -9,15 +9,23 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 
-import static com.github.tomakehurst.wiremock.client.WireMock.*;
-import static org.junit.jupiter.api.Assertions.*;
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TypstCustomRegistryTest {
 
     private static WireMockServer wireMock;
     private static final Path CACHE_DIR = Path.of(
-            System.getProperty("user.home"), "Library", "Caches", "typst", "packages");
+            System.getProperty("java.io.tmpdir"), "typst", "packages");
 
     @BeforeAll
     static void startWireMock() throws IOException {
@@ -46,7 +54,6 @@ class TypstCustomRegistryTest {
         wireMock.stubFor(get(urlMatching("/preview/nonexistent-.*"))
                 .willReturn(aResponse().withStatus(404)));
 
-        // Clean cached packages so they download from WireMock
         deleteCachedPackage("preview/cades/0.3.1");
         deleteCachedPackage("preview/jogs/0.2.4");
     }
@@ -131,27 +138,56 @@ class TypstCustomRegistryTest {
     }
 
     @Test
+    void reDownloadsAfterCacheCleared() {
+        String registryUrl = "http://localhost:" + wireMock.port();
+
+        try (var engine = TypstEngine.builder()
+                .registry(registryUrl)
+                .build()) {
+
+            String source = """
+                    #import "@preview/cades:0.3.1": qr-code
+                    #qr-code("test", width: 2cm)
+                    """;
+
+            // First render — downloads and caches
+            byte[] pdf1 = engine.template("cache-test-1", source).renderPdf();
+            assertNotNull(pdf1);
+
+            // Wipe the cache
+            deleteCachedPackage("preview/cades/0.3.1");
+            deleteCachedPackage("preview/jogs/0.2.4");
+            assertFalse(Files.exists(CACHE_DIR.resolve("preview/cades/0.3.1")));
+
+            // Second render — should re-download automatically
+            byte[] pdf2 = engine.template("cache-test-2", source).renderPdf();
+            assertNotNull(pdf2);
+            assertTrue(Files.isDirectory(CACHE_DIR.resolve("preview/cades/0.3.1")));
+        }
+    }
+
+    @Test
     void defaultRegistryIsUsedWhenNotConfigured() {
-        // Engine without custom registry should not hit WireMock
         try (var engine = TypstEngine.builder().build()) {
             byte[] pdf = engine.template("no-registry", "= Hello").renderPdf();
             assertNotNull(pdf);
             assertTrue(pdf.length > 0);
         }
-
-        // WireMock should not have received any requests from this test
-        // (requests from other tests are expected, so we just verify the engine works)
     }
 
     private static void deleteCachedPackage(String subdir) {
         Path pkgDir = CACHE_DIR.resolve(subdir);
         if (Files.exists(pkgDir)) {
             try (var walk = Files.walk(pkgDir)) {
-                walk.sorted(java.util.Comparator.reverseOrder())
+                walk.sorted(Comparator.reverseOrder())
                         .forEach(p -> {
-                            try { Files.deleteIfExists(p); } catch (IOException _) {}
+                            try { Files.deleteIfExists(p); } catch (IOException _) {
+                                // ignore
+                            }
                         });
-            } catch (IOException _) {}
+            } catch (IOException _) {
+                // ignore
+            }
         }
     }
 }

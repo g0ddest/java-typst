@@ -11,6 +11,7 @@ use std::ffi::{CStr, c_char, c_int};
 use std::ptr;
 
 use crate::engine::TypstJavaEngine;
+use crate::packages::ResolveFn;
 use crate::result::TypstResult;
 
 /// Create a new Typst engine.
@@ -18,32 +19,33 @@ use crate::result::TypstResult;
 /// `config_json` is a JSON string like `{"template_cache_enabled": true}`.
 /// Pass null for defaults (cache enabled).
 ///
+/// `download_fn` is a callback for downloading package URLs.
+///
 /// Returns a heap-allocated engine pointer. Must be freed with `typst_engine_free`.
 #[no_mangle]
-pub extern "C" fn typst_engine_new(config_json: *const c_char) -> *mut TypstJavaEngine {
-    let (cache_enabled, registry) = if config_json.is_null() {
-        (true, None)
+pub extern "C" fn typst_engine_new(
+    config_json: *const c_char,
+    download_fn: ResolveFn,
+) -> *mut TypstJavaEngine {
+    let cache_enabled = if config_json.is_null() {
+        true
     } else {
         let c_str = unsafe { CStr::from_ptr(config_json) };
         match c_str.to_str() {
             Ok(s) => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                    let cache = v.get("template_cache_enabled")
+                    v.get("template_cache_enabled")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    let reg = v.get("registry")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.trim_end_matches('/').to_string());
-                    (cache, reg)
+                        .unwrap_or(true)
                 } else {
-                    (true, None)
+                    true
                 }
             }
-            Err(_) => (true, None),
+            Err(_) => true,
         }
     };
 
-    let engine = TypstJavaEngine::new(cache_enabled, registry);
+    let engine = TypstJavaEngine::new(cache_enabled, download_fn);
     Box::into_raw(Box::new(engine))
 }
 
@@ -258,10 +260,19 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    extern "C" fn noop_resolve(
+        _ns: *const c_char,
+        _name: *const c_char,
+        _ver: *const c_char,
+        _out_path: *mut *const c_char,
+    ) -> c_int {
+        -1
+    }
+
     #[test]
     fn test_full_lifecycle() {
         // Create engine
-        let engine = typst_engine_new(ptr::null());
+        let engine = typst_engine_new(ptr::null(), noop_resolve);
         assert!(!engine.is_null());
 
         // Compile a simple template
@@ -321,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_compile_with_data() {
-        let engine = typst_engine_new(ptr::null());
+        let engine = typst_engine_new(ptr::null(), noop_resolve);
 
         let key = CString::new("test").unwrap();
         let source = CString::new(
@@ -349,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_error_diagnostics() {
-        let engine = typst_engine_new(ptr::null());
+        let engine = typst_engine_new(ptr::null(), noop_resolve);
 
         let key = CString::new("test").unwrap();
         let source = CString::new("#nonexistent()").unwrap();
@@ -373,7 +384,7 @@ mod tests {
     #[test]
     fn test_config_parsing() {
         let config = CString::new(r#"{"template_cache_enabled": false}"#).unwrap();
-        let engine = typst_engine_new(config.as_ptr());
+        let engine = typst_engine_new(config.as_ptr(), noop_resolve);
         assert!(!engine.is_null());
 
         // Should still compile fine even with cache disabled

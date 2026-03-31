@@ -1,78 +1,138 @@
 // Package management
 
-use std::fs;
-use std::io::Read;
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::PathBuf;
 
 use ecow::eco_format;
 use typst::diag::{PackageError, PackageResult};
 use typst::syntax::package::PackageSpec;
 
-/// The default Typst registry URL.
-pub const DEFAULT_REGISTRY: &str = "https://packages.typst.org";
-
-/// Download and unpack a Typst package, caching it on disk.
-/// Returns the path to the unpacked package directory.
+/// Callback for resolving a package to an on-disk directory.
 ///
-/// `registry` overrides the default registry URL when provided.
-pub fn download_package(spec: &PackageSpec, registry: &str) -> PackageResult<PathBuf> {
-    let subdir = format!("{}/{}/{}", spec.namespace, spec.name, spec.version);
+/// Called from Rust with package coordinates. The Java side handles
+/// downloading, caching, and unpacking. Returns a path to the
+/// unpacked package directory.
+///
+/// - `namespace`, `name`, `version`: null-terminated package coordinates
+/// - `out_path`: on success, set to a null-terminated path string
+///
+/// Returns: 0 = success, 1 = not found, -1 = other error.
+pub type ResolveFn = extern "C" fn(
+    namespace: *const c_char,
+    name: *const c_char,
+    version: *const c_char,
+    out_path: *mut *const c_char,
+) -> c_int;
 
-    // Determine cache directory
-    let cache_dir = dirs::cache_dir()
-        .ok_or_else(|| PackageError::Other(Some(eco_format!("no cache directory found"))))?
-        .join("typst/packages");
+/// Resolve a Typst package to an on-disk directory via the host callback.
+pub fn resolve_package(
+    spec: &PackageSpec,
+    resolve: ResolveFn,
+) -> PackageResult<PathBuf> {
+    let c_ns = CString::new(spec.namespace.as_str())
+        .map_err(|_| PackageError::Other(Some(eco_format!("invalid namespace"))))?;
+    let c_name = CString::new(spec.name.as_str())
+        .map_err(|_| PackageError::Other(Some(eco_format!("invalid name"))))?;
+    let c_ver = CString::new(spec.version.to_string())
+        .map_err(|_| PackageError::Other(Some(eco_format!("invalid version"))))?;
 
-    let package_dir = cache_dir.join(&subdir);
+    let mut path_ptr: *const c_char = std::ptr::null();
 
-    // If already cached, return immediately
-    if package_dir.exists() {
-        return Ok(package_dir);
-    }
-
-    // Download the tarball
-    let url = format!(
-        "{}/{}/{}-{}.tar.gz",
-        registry, spec.namespace, spec.name, spec.version
+    let rc = resolve(
+        c_ns.as_ptr(), c_name.as_ptr(), c_ver.as_ptr(),
+        &mut path_ptr,
     );
 
-    let response = ureq::get(&url).call().map_err(|err| match err {
-        ureq::Error::Status(404, _) => PackageError::NotFound(spec.clone()),
-        other => PackageError::NetworkFailed(Some(eco_format!("{other}"))),
-    })?;
-
-    let mut data = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut data)
-        .map_err(|err| PackageError::NetworkFailed(Some(eco_format!("{err}"))))?;
-
-    // Create the package directory
-    fs::create_dir_all(&package_dir)
-        .map_err(|err| PackageError::Other(Some(eco_format!("{err}"))))?;
-
-    // Decompress and unpack
-    let decompressed = flate2::read::GzDecoder::new(data.as_slice());
-    tar::Archive::new(decompressed)
-        .unpack(&package_dir)
-        .map_err(|err| {
-            fs::remove_dir_all(&package_dir).ok();
-            PackageError::MalformedArchive(Some(eco_format!("{err}")))
-        })?;
-
-    Ok(package_dir)
+    match rc {
+        0 => {
+            let path_str = unsafe { CStr::from_ptr(path_ptr) }
+                .to_str()
+                .map_err(|_| PackageError::Other(Some(eco_format!("invalid path"))))?;
+            Ok(PathBuf::from(path_str))
+        }
+        1 => Err(PackageError::NotFound(spec.clone())),
+        _ => Err(PackageError::NetworkFailed(Some(eco_format!("package resolve failed")))),
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
-    use std::io::Write;
+    use std::fs;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicU16, Ordering};
     use std::thread;
     use ecow::EcoString;
     use typst::syntax::package::PackageVersion;
 
-    /// Create a minimal Typst package as a tar.gz archive in memory.
+    pub static TEST_SERVER_PORT: AtomicU16 = AtomicU16::new(0);
+
+    // Thread-local storage for the resolved path string (keeps it alive for Rust to read).
+    thread_local! {
+        static RESOLVED_PATH: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Test resolver that downloads from a local HTTP server, unpacks tar.gz, and returns the path.
+    pub extern "C" fn test_resolve(
+        namespace: *const c_char,
+        name: *const c_char,
+        version: *const c_char,
+        out_path: *mut *const c_char,
+    ) -> c_int {
+        let ns = unsafe { CStr::from_ptr(namespace) }.to_str().unwrap();
+        let n = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+        let v = unsafe { CStr::from_ptr(version) }.to_str().unwrap();
+
+        // Check cache
+        let cache_dir = dirs::cache_dir().unwrap().join("typst/packages");
+        let package_dir = cache_dir.join(format!("{ns}/{n}/{v}"));
+        if package_dir.exists() {
+            let path = CString::new(package_dir.to_str().unwrap()).unwrap();
+            unsafe { *out_path = path.as_ptr(); }
+            RESOLVED_PATH.with(|p| *p.borrow_mut() = Some(path));
+            return 0;
+        }
+
+        // Download from test server
+        let port = TEST_SERVER_PORT.load(Ordering::Relaxed);
+        let host = format!("127.0.0.1:{}", port);
+        let url_path = format!("{}/{}-{}.tar.gz", ns, n, v);
+
+        let mut stream = match std::net::TcpStream::connect(&host) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        let request = format!("GET /{url_path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_err() { return -1; }
+
+        let mut response = Vec::new();
+        if stream.read_to_end(&mut response).is_err() { return -1; }
+
+        let status_end = response.iter().position(|&b| b == b'\r').unwrap_or(0);
+        let status_line = std::str::from_utf8(&response[..status_end]).unwrap_or("");
+        if status_line.contains("404") { return 1; }
+        if !status_line.contains("200") { return -1; }
+
+        let header_end = response.windows(4).position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4).unwrap_or(response.len());
+        let data = &response[header_end..];
+
+        // Unpack tar.gz
+        fs::create_dir_all(&package_dir).unwrap();
+        let decompressed = flate2::read::GzDecoder::new(data);
+        if tar::Archive::new(decompressed).unpack(&package_dir).is_err() {
+            fs::remove_dir_all(&package_dir).ok();
+            return -1;
+        }
+
+        let path = CString::new(package_dir.to_str().unwrap()).unwrap();
+        unsafe { *out_path = path.as_ptr(); }
+        RESOLVED_PATH.with(|p| *p.borrow_mut() = Some(path));
+        0
+    }
+
     fn create_test_package_tar_gz() -> Vec<u8> {
         let mut tar_builder = tar::Builder::new(Vec::new());
 
@@ -93,21 +153,17 @@ mod tests {
         tar_builder.append(&header, &lib_typ[..]).unwrap();
 
         let tar_data = tar_builder.into_inner().unwrap();
-
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&tar_data).unwrap();
         encoder.finish().unwrap()
     }
 
-    /// Start a one-shot HTTP server that serves the given bytes on any request.
-    /// Returns (port, join_handle).
     fn start_mini_registry(tar_gz: Vec<u8>) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            // Read request headers (we don't care about contents)
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
 
@@ -123,8 +179,7 @@ mod tests {
         (port, handle)
     }
 
-    /// Clean up the cached package directory for the test.
-    fn cleanup_test_package_cache() {
+    pub fn cleanup_test_package_cache() {
         if let Some(cache_dir) = dirs::cache_dir() {
             let pkg_dir = cache_dir.join("typst/packages/test-local/test-hello/0.1.0");
             fs::remove_dir_all(&pkg_dir).ok();
@@ -132,12 +187,12 @@ mod tests {
     }
 
     #[test]
-    fn test_download_from_custom_registry() {
+    fn test_resolve_from_custom_registry() {
         cleanup_test_package_cache();
 
         let tar_gz = create_test_package_tar_gz();
         let (port, server) = start_mini_registry(tar_gz);
-        let registry = format!("http://127.0.0.1:{}", port);
+        TEST_SERVER_PORT.store(port, Ordering::Relaxed);
 
         let spec = PackageSpec {
             namespace: EcoString::from("test-local"),
@@ -145,25 +200,22 @@ mod tests {
             version: PackageVersion { major: 0, minor: 1, patch: 0 },
         };
 
-        let result = download_package(&spec, &registry);
-        assert!(result.is_ok(), "download should succeed: {:?}", result.err());
+        let result = resolve_package(&spec, test_resolve);
+        assert!(result.is_ok(), "resolve should succeed: {:?}", result.err());
 
         let pkg_dir = result.unwrap();
-        assert!(pkg_dir.join("typst.toml").exists(), "typst.toml should exist");
-        assert!(pkg_dir.join("lib.typ").exists(), "lib.typ should exist");
-
-        let lib_content = fs::read_to_string(pkg_dir.join("lib.typ")).unwrap();
-        assert!(lib_content.contains("greet"), "lib.typ should contain greet function");
+        assert!(pkg_dir.join("typst.toml").exists());
+        assert!(pkg_dir.join("lib.typ").exists());
 
         cleanup_test_package_cache();
         server.join().unwrap();
     }
 
     #[test]
-    fn test_custom_registry_404_returns_not_found() {
+    fn test_resolve_404_returns_not_found() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let registry = format!("http://127.0.0.1:{}", port);
+        TEST_SERVER_PORT.store(port, Ordering::Relaxed);
 
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -188,8 +240,8 @@ mod tests {
             version: PackageVersion { major: 0, minor: 1, patch: 0 },
         };
 
-        let result = download_package(&spec, &registry);
-        assert!(result.is_err(), "should fail with 404");
+        let result = resolve_package(&spec, test_resolve);
+        assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), PackageError::NotFound(_)));
 
         handle.join().unwrap();

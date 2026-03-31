@@ -14,7 +14,7 @@ use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
 use crate::fonts::FontManager;
-use crate::packages;
+use crate::packages::{self, ResolveFn};
 use crate::vfs::Vfs;
 
 /// The World implementation for typst-java.
@@ -35,8 +35,8 @@ pub struct TypstJavaWorld {
     sources: RwLock<HashMap<FileId, Source>>,
     /// Cache of resolved package paths.
     package_paths: RwLock<HashMap<PackageSpec, PathBuf>>,
-    /// Package registry URL.
-    registry: String,
+    /// Package resolver callback.
+    download_fn: ResolveFn,
 }
 
 impl TypstJavaWorld {
@@ -53,7 +53,7 @@ impl TypstJavaWorld {
         root: PathBuf,
         main_source_text: String,
         data_json: Option<String>,
-        registry: String,
+        download_fn: ResolveFn,
     ) -> Self {
         let main_id = FileId::new(None, VirtualPath::new("main.typ"));
         let main_source = Source::new(main_id, main_source_text);
@@ -74,7 +74,7 @@ impl TypstJavaWorld {
             vfs,
             sources: RwLock::new(HashMap::new()),
             package_paths: RwLock::new(HashMap::new()),
-            registry,
+            download_fn,
         }
     }
 
@@ -86,7 +86,7 @@ impl TypstJavaWorld {
             let package_root = if let Some(root) = paths.get(spec) {
                 root.clone()
             } else {
-                let root = packages::download_package(spec, &self.registry)
+                let root = packages::resolve_package(spec, self.download_fn)
                     .map_err(|e| FileError::Package(e))?;
                 paths.insert(spec.clone(), root.clone());
                 root
