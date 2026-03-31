@@ -132,6 +132,7 @@ public final class TypstEngine implements AutoCloseable {
      */
     public static final class Builder {
         private boolean templateCacheEnabled = true;
+        private String registry = null;
         private final List<FontSource> fontSources = new ArrayList<>();
 
         private Builder() {}
@@ -178,6 +179,19 @@ public final class TypstEngine implements AutoCloseable {
         }
 
         /**
+         * Set a custom package registry URL, replacing the default
+         * {@code https://packages.typst.org}.
+         *
+         * @param registryUrl the registry base URL
+         * @return this builder
+         */
+        public Builder registry(String registryUrl) {
+            Objects.requireNonNull(registryUrl, "registryUrl must not be null");
+            this.registry = registryUrl;
+            return this;
+        }
+
+        /**
          * Enable or disable the template cache in the native engine.
          * Default is {@code true}.
          *
@@ -197,7 +211,15 @@ public final class TypstEngine implements AutoCloseable {
          */
         public TypstEngine build() {
             Arena arena = Arena.ofAuto();
-            String config = "{\"template_cache_enabled\":" + templateCacheEnabled + "}";
+            var configBuilder = new StringBuilder();
+            configBuilder.append("{\"template_cache_enabled\":").append(templateCacheEnabled);
+            if (registry != null) {
+                configBuilder.append(",\"registry\":\"")
+                        .append(registry.replace("\\", "\\\\").replace("\"", "\\\""))
+                        .append("\"");
+            }
+            configBuilder.append("}");
+            String config = configBuilder.toString();
             MemorySegment ptr = TypstNative.engineNew(arena, config);
             if (ptr == null || ptr.equals(MemorySegment.NULL)) {
                 throw new TypstEngineException("Failed to create native engine");

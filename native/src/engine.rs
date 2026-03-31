@@ -10,6 +10,7 @@ use typst_pdf::PdfOptions;
 use crate::cache::{CachedTemplate, TemplateCache};
 use crate::diagnostics::diagnostics_to_json;
 use crate::fonts::FontManager;
+use crate::packages::DEFAULT_REGISTRY;
 use crate::result::TypstResult;
 use crate::world::TypstJavaWorld;
 
@@ -21,15 +22,18 @@ pub struct TypstJavaEngine {
     cache_enabled: bool,
     /// Template source cache.
     cache: RwLock<TemplateCache>,
+    /// Package registry URL.
+    registry: String,
 }
 
 impl TypstJavaEngine {
     /// Create a new engine.
-    pub fn new(cache_enabled: bool) -> Self {
+    pub fn new(cache_enabled: bool, registry: Option<String>) -> Self {
         Self {
             font_manager: Arc::new(FontManager::new()),
             cache_enabled,
             cache: RwLock::new(TemplateCache::new()),
+            registry: registry.unwrap_or_else(|| DEFAULT_REGISTRY.to_string()),
         }
     }
 
@@ -92,6 +96,7 @@ impl TypstJavaEngine {
             root,
             source_text,
             data_json.map(|s| s.to_string()),
+            self.registry.clone(),
         );
 
         // 5. Compile
@@ -180,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_simple_compile() {
-        let engine = TypstJavaEngine::new(true);
+        let engine = TypstJavaEngine::new(true, None);
         let result = engine.compile("test", Some("Hello, World!"), None);
         assert!(result.is_ok(), "Simple compile should succeed");
         assert!(result.pdf_data().is_some(), "Should produce PDF bytes");
@@ -191,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_compile_with_data_json() {
-        let engine = TypstJavaEngine::new(true);
+        let engine = TypstJavaEngine::new(true, None);
         let source = r#"
 #let data = json("data.json")
 Hello, #data.name!
@@ -204,7 +209,7 @@ Hello, #data.name!
 
     #[test]
     fn test_invalid_template_returns_errors() {
-        let engine = TypstJavaEngine::new(true);
+        let engine = TypstJavaEngine::new(true, None);
         let source = "#unknown_function()";
         let result = engine.compile("test", Some(source), None);
         assert!(!result.is_ok(), "Invalid template should fail");
@@ -212,5 +217,79 @@ Hello, #data.name!
             .to_str()
             .unwrap();
         assert!(errors.contains("ERROR"), "Errors should contain ERROR severity");
+    }
+
+    #[test]
+    fn test_compile_with_custom_registry_package() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        // Create a test package tar.gz with a greet function
+        let mut tar_builder = tar::Builder::new(Vec::new());
+
+        let typst_toml = b"[package]\nname = \"test-hello\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("typst.toml").unwrap();
+        header.set_size(typst_toml.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append(&header, &typst_toml[..]).unwrap();
+
+        let lib_typ = b"#let greet(name) = [Hello, #name!]\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("lib.typ").unwrap();
+        header.set_size(lib_typ.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append(&header, &lib_typ[..]).unwrap();
+
+        let tar_data = tar_builder.into_inner().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tar_data).unwrap();
+        let tar_gz = encoder.finish().unwrap();
+
+        // Start mini registry
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/gzip\r\n\r\n",
+                tar_gz.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&tar_gz).unwrap();
+            stream.flush().unwrap();
+        });
+
+        // Clean up cached package
+        if let Some(cache_dir) = dirs::cache_dir() {
+            let pkg_dir = cache_dir.join("typst/packages/test-local/test-hello/0.1.0");
+            std::fs::remove_dir_all(&pkg_dir).ok();
+        }
+
+        // Create engine with custom registry
+        let registry = format!("http://127.0.0.1:{}", port);
+        let engine = TypstJavaEngine::new(true, Some(registry));
+
+        // Compile a template that imports from the custom registry
+        let source = r#"#import "@test-local/test-hello:0.1.0": greet
+#greet("Typst")
+"#;
+        let result = engine.compile("test", Some(source), None);
+        assert!(result.is_ok(), "Compile with custom registry package should succeed");
+        assert!(result.pdf_data().is_some(), "Should produce PDF");
+
+        // Clean up
+        if let Some(cache_dir) = dirs::cache_dir() {
+            let pkg_dir = cache_dir.join("typst/packages/test-local/test-hello/0.1.0");
+            std::fs::remove_dir_all(&pkg_dir).ok();
+        }
+        server.join().unwrap();
     }
 }

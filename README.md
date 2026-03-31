@@ -122,6 +122,7 @@ TypstEngine engine = TypstEngine.builder()
     .addFont(fontBytes)                           // byte[]
     .addFont(inputStream)                         // InputStream (classpath, DB, S3)
     .enableTemplateCache(true)                    // default: true
+    .registry("https://my-registry.example.com") // custom package registry
     .build();
 ```
 
@@ -230,6 +231,18 @@ Templates work in [typst.app](https://typst.app) with a manually provided `data.
 
 Typst packages from [packages.typst.org](https://packages.typst.org) are supported and downloaded on demand.
 
+### Custom Package Registry
+
+By default, packages are fetched from `https://packages.typst.org`. To use a private or mirrored registry:
+
+```java
+var engine = TypstEngine.builder()
+    .registry("https://my-registry.example.com")
+    .build();
+```
+
+The registry URL replaces the default for all package downloads. The expected URL format is `{registry}/{namespace}/{name}-{version}.tar.gz`.
+
 ## Architecture
 
 ```
@@ -252,7 +265,7 @@ libtypst_java.so/dylib/dll (Rust shared library)
     |--- Font book (typst-assets, embedded)
     |--- Template cache (RwLock<HashMap>)
     |--- Virtual filesystem (data.json injection)
-    |--- Package resolver (packages.typst.org)
+    |--- Package resolver (configurable registry)
 ```
 
 ## Building from Source

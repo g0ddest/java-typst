@@ -6,7 +6,7 @@
 
     <groupId>name.velikodniy.vitaliy</groupId>
     <artifactId>typst-java</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
 
     <name>typst-java</name>
     <description>Typst PDF generation library for Java 25+</description>
@@ -49,6 +49,12 @@
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock</artifactId>
+            <version>3.12.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
