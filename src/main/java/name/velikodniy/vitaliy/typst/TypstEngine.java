@@ -1,5 +1,6 @@
 package name.velikodniy.vitaliy.typst;
 
+import name.velikodniy.vitaliy.typst.internal.PackageManager;
 import name.velikodniy.vitaliy.typst.internal.TypstNative;
 
 import java.io.IOException;
@@ -34,9 +35,16 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class TypstEngine implements AutoCloseable {
 
     private final AtomicReference<MemorySegment> enginePtr;
+    private final Arena nativeArena;
+    private final PackageManager packageManager;
+    private final AutoCloseable resolver;
 
-    private TypstEngine(MemorySegment enginePtr) {
+    private TypstEngine(MemorySegment enginePtr, Arena nativeArena,
+                        PackageManager packageManager, AutoCloseable resolver) {
         this.enginePtr = new AtomicReference<>(enginePtr);
+        this.nativeArena = nativeArena;
+        this.packageManager = packageManager;
+        this.resolver = resolver;
     }
 
     /**
@@ -111,11 +119,20 @@ public final class TypstEngine implements AutoCloseable {
         return getEnginePtr();
     }
 
+    /**
+     * Package-private: returns the package manager for this engine.
+     */
+    PackageManager packageManager() {
+        return packageManager;
+    }
+
     @Override
     public void close() {
         MemorySegment ptr = enginePtr.getAndSet(null);
         if (ptr != null) {
             TypstNative.engineFree(ptr);
+            nativeArena.close();
+            try { resolver.close(); } catch (Exception _) { /* ignore */ }
         }
     }
 
@@ -131,8 +148,11 @@ public final class TypstEngine implements AutoCloseable {
      * Fluent builder for constructing a {@link TypstEngine}.
      */
     public static final class Builder {
+        private static final String DEFAULT_REGISTRY = "https://packages.typst.org";
+
         private boolean templateCacheEnabled = true;
         private String registry = null;
+        private TypstPackageResolver packageResolver = null;
         private final List<FontSource> fontSources = new ArrayList<>();
 
         private Builder() {}
@@ -180,7 +200,7 @@ public final class TypstEngine implements AutoCloseable {
 
         /**
          * Set a custom package registry URL, replacing the default
-         * {@code https://packages.typst.org}.
+         * {@code https://packages.typst.org}. Creates an HTTP-based resolver.
          *
          * @param registryUrl the registry base URL
          * @return this builder
@@ -188,6 +208,18 @@ public final class TypstEngine implements AutoCloseable {
         public Builder registry(String registryUrl) {
             Objects.requireNonNull(registryUrl, "registryUrl must not be null");
             this.registry = registryUrl;
+            return this;
+        }
+
+        /**
+         * Set a custom package resolver. Takes precedence over {@link #registry(String)}.
+         *
+         * @param resolver the resolver to use for fetching packages
+         * @return this builder
+         */
+        public Builder packageResolver(TypstPackageResolver resolver) {
+            Objects.requireNonNull(resolver, "resolver must not be null");
+            this.packageResolver = resolver;
             return this;
         }
 
@@ -210,22 +242,22 @@ public final class TypstEngine implements AutoCloseable {
          * @throws TypstEngineException if engine creation or font loading fails
          */
         public TypstEngine build() {
-            Arena arena = Arena.ofAuto();
-            var configBuilder = new StringBuilder();
-            configBuilder.append("{\"template_cache_enabled\":").append(templateCacheEnabled);
-            if (registry != null) {
-                configBuilder.append(",\"registry\":\"")
-                        .append(registry.replace("\\", "\\\\").replace("\"", "\\\""))
-                        .append("\"");
-            }
-            configBuilder.append("}");
-            String config = configBuilder.toString();
-            MemorySegment ptr = TypstNative.engineNew(arena, config);
+            Arena arena = Arena.ofConfined();
+            String config = "{\"template_cache_enabled\":" + templateCacheEnabled + "}";
+            TypstPackageResolver resolver = this.packageResolver != null
+                    ? this.packageResolver
+                    : new HttpPackageResolver(
+                            registry != null ? registry : DEFAULT_REGISTRY);
+            // Track resolver for cleanup if it's AutoCloseable (e.g. HttpPackageResolver)
+            AutoCloseable closeable = resolver instanceof AutoCloseable ac ? ac : () -> {};
+            var packageManager = new PackageManager(resolver);
+            MemorySegment resolverStub = TypstNative.createResolverStub(arena);
+            MemorySegment ptr = TypstNative.engineNew(arena, config, resolverStub);
             if (ptr == null || ptr.equals(MemorySegment.NULL)) {
                 throw new TypstEngineException("Failed to create native engine");
             }
 
-            TypstEngine engine = new TypstEngine(ptr);
+            TypstEngine engine = new TypstEngine(ptr, arena, packageManager, closeable);
 
             // Load fonts
             try (var fontArena = Arena.ofConfined()) {

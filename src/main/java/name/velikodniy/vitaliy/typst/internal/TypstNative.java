@@ -1,15 +1,17 @@
 package name.velikodniy.vitaliy.typst.internal;
 
 import name.velikodniy.vitaliy.typst.TypstNativeException;
+import name.velikodniy.vitaliy.typst.TypstPackageNotFoundException;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
-import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 
 /**
  * FFM API bindings for the typst-java native library.
@@ -34,10 +36,10 @@ public final class TypstNative {
         SymbolLookup symbols = NativeLibLoader.load();
         Linker linker = Linker.nativeLinker();
 
-        // typst_engine_new(const char*) -> void*
+        // typst_engine_new(const char*, download_fn) -> void*
         ENGINE_NEW = linker.downcallHandle(
                 symbols.find("typst_engine_new").orElseThrow(),
-                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
         // typst_engine_free(void*)
         ENGINE_FREE = linker.downcallHandle(
@@ -101,19 +103,102 @@ public final class TypstNative {
 
     private TypstNative() {}
 
+    // int32_t(namespace, name, version, out_path*) — 4 ADDRESS params
+    private static final FunctionDescriptor RESOLVE_FN_DESC = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS);
+
+    // Per-thread state set before each compile() call so the upcall resolves
+    // packages through the correct engine's resolver and allocates in a
+    // deterministic arena.
+    private static final ThreadLocal<PackageManager> ACTIVE_PACKAGE_MANAGER = new ThreadLocal<>();
+    private static final ThreadLocal<Arena> COMPILE_ARENA = new ThreadLocal<>();
+
     /**
-     * Create a new Typst engine with the given JSON config.
+     * Set the per-thread context for a compilation call.
+     * Must be called before each native compilation.
      *
-     * @param arena  arena for allocating the config string
-     * @param config JSON config string (e.g. {"template_cache_enabled":true})
+     * @param pm    the package manager for this engine
+     * @param arena the arena for allocating path strings returned to Rust
+     */
+    public static void setCompileContext(PackageManager pm, Arena arena) {
+        ACTIVE_PACKAGE_MANAGER.set(pm);
+        COMPILE_ARENA.set(arena);
+    }
+
+    /**
+     * Clear the per-thread compilation context.
+     */
+    public static void clearCompileContext() {
+        ACTIVE_PACKAGE_MANAGER.remove();
+        COMPILE_ARENA.remove();
+    }
+
+    /**
+     * Upcall target: called from Rust when a package needs resolving.
+     * Returns a path to the unpacked package directory.
+     */
+    @SuppressWarnings("unused") // called via upcall from native code
+    private static int resolveCallback(MemorySegment nsPtr,
+                                       MemorySegment namePtr,
+                                       MemorySegment versionPtr,
+                                       MemorySegment outPathPtr) {
+        try {
+            PackageManager pm = ACTIVE_PACKAGE_MANAGER.get();
+            if (pm == null) return -1;
+
+            String ns = nsPtr.reinterpret(Long.MAX_VALUE).getString(0);
+            String name = namePtr.reinterpret(Long.MAX_VALUE).getString(0);
+            String version = versionPtr.reinterpret(Long.MAX_VALUE).getString(0);
+
+            String path = pm.resolveToPath(ns, name, version);
+
+            Arena arena = COMPILE_ARENA.get();
+            MemorySegment pathSeg = (arena != null ? arena : Arena.ofAuto()).allocateFrom(path);
+            outPathPtr.reinterpret(ValueLayout.ADDRESS.byteSize())
+                    .set(ValueLayout.ADDRESS, 0, pathSeg);
+            return 0;
+        } catch (TypstPackageNotFoundException _) {
+            return 1;
+        } catch (Exception _) {
+            return -1;
+        }
+    }
+
+    /**
+     * Create an upcall stub for the package resolver.
+     *
+     * @param arena arena whose lifetime controls the stub's validity
+     * @return a function pointer usable from native code
+     */
+    public static MemorySegment createResolverStub(Arena arena) {
+        try {
+            var handle = MethodHandles.lookup().findStatic(
+                    TypstNative.class, "resolveCallback",
+                    MethodType.methodType(int.class,
+                            MemorySegment.class, MemorySegment.class,
+                            MemorySegment.class, MemorySegment.class));
+            return Linker.nativeLinker().upcallStub(handle, RESOLVE_FN_DESC, arena);
+        } catch (Throwable t) {
+            throw wrap(t);
+        }
+    }
+
+    /**
+     * Create a new Typst engine with the given JSON config and download callback.
+     *
+     * @param arena       arena for allocating the config string
+     * @param config      JSON config string (e.g. {"template_cache_enabled":true})
+     * @param downloadFn  function pointer for downloading package URLs
      * @return pointer to the engine (opaque)
      */
-    public static MemorySegment engineNew(Arena arena, String config) {
+    public static MemorySegment engineNew(Arena arena, String config, MemorySegment downloadFn) {
         try {
             MemorySegment configPtr = (config != null)
                     ? arena.allocateFrom(config)
                     : MemorySegment.NULL;
-            return (MemorySegment) ENGINE_NEW.invokeExact(configPtr);
+            return (MemorySegment) ENGINE_NEW.invokeExact(configPtr, downloadFn);
         } catch (Throwable t) {
             throw wrap(t);
         }

@@ -10,16 +10,15 @@ crate-type = ["cdylib"]
 typst = "0.14"
 typst-pdf = "0.14"
 typst-assets = { version = "0.14", features = ["fonts"] }
-typst-kit = { version = "0.14", default-features = false, features = ["fonts"] }
 serde_json = "1"
 parking_lot = "0.12"
-ureq = { version = "2", default-features = false, features = ["tls"] }
-tar = "0.4"
-flate2 = "1"
 chrono = "0.4"
-comemo = "0.4"
 ttf-parser = "0.25"
 ecow = "0.2"
+
+[dev-dependencies]
+tar = "0.4"
+flate2 = "1"
 dirs = "6"
 
 [profile.release]

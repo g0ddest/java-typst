@@ -10,7 +10,7 @@ use typst_pdf::PdfOptions;
 use crate::cache::{CachedTemplate, TemplateCache};
 use crate::diagnostics::diagnostics_to_json;
 use crate::fonts::FontManager;
-use crate::packages::DEFAULT_REGISTRY;
+use crate::packages::ResolveFn;
 use crate::result::TypstResult;
 use crate::world::TypstJavaWorld;
 
@@ -22,18 +22,18 @@ pub struct TypstJavaEngine {
     cache_enabled: bool,
     /// Template source cache.
     cache: RwLock<TemplateCache>,
-    /// Package registry URL.
-    registry: String,
+    /// Package resolver callback provided by the host (Java).
+    download_fn: ResolveFn,
 }
 
 impl TypstJavaEngine {
     /// Create a new engine.
-    pub fn new(cache_enabled: bool, registry: Option<String>) -> Self {
+    pub fn new(cache_enabled: bool, download_fn: ResolveFn) -> Self {
         Self {
             font_manager: Arc::new(FontManager::new()),
             cache_enabled,
             cache: RwLock::new(TemplateCache::new()),
-            registry: registry.unwrap_or_else(|| DEFAULT_REGISTRY.to_string()),
+            download_fn,
         }
     }
 
@@ -96,7 +96,7 @@ impl TypstJavaEngine {
             root,
             source_text,
             data_json.map(|s| s.to_string()),
-            self.registry.clone(),
+            self.download_fn,
         );
 
         // 5. Compile
@@ -182,10 +182,21 @@ impl TypstJavaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::c_int;
+
+    /// Stub download function for tests that don't need packages.
+    extern "C" fn noop_resolve(
+        _ns: *const std::ffi::c_char,
+        _name: *const std::ffi::c_char,
+        _ver: *const std::ffi::c_char,
+        _out_path: *mut *const std::ffi::c_char,
+    ) -> c_int {
+        -1 // always fail — no packages needed
+    }
 
     #[test]
     fn test_simple_compile() {
-        let engine = TypstJavaEngine::new(true, None);
+        let engine = TypstJavaEngine::new(true, noop_resolve);
         let result = engine.compile("test", Some("Hello, World!"), None);
         assert!(result.is_ok(), "Simple compile should succeed");
         assert!(result.pdf_data().is_some(), "Should produce PDF bytes");
@@ -196,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_compile_with_data_json() {
-        let engine = TypstJavaEngine::new(true, None);
+        let engine = TypstJavaEngine::new(true, noop_resolve);
         let source = r#"
 #let data = json("data.json")
 Hello, #data.name!
@@ -209,7 +220,7 @@ Hello, #data.name!
 
     #[test]
     fn test_invalid_template_returns_errors() {
-        let engine = TypstJavaEngine::new(true, None);
+        let engine = TypstJavaEngine::new(true, noop_resolve);
         let source = "#unknown_function()";
         let result = engine.compile("test", Some(source), None);
         assert!(!result.is_ok(), "Invalid template should fail");
@@ -224,8 +235,9 @@ Hello, #data.name!
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
+        use crate::packages::tests::{test_resolve, cleanup_test_package_cache, TEST_SERVER_PORT};
+        use std::sync::atomic::Ordering;
 
-        // Create a test package tar.gz with a greet function
         let mut tar_builder = tar::Builder::new(Vec::new());
 
         let typst_toml = b"[package]\nname = \"test-hello\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n";
@@ -249,7 +261,6 @@ Hello, #data.name!
         encoder.write_all(&tar_data).unwrap();
         let tar_gz = encoder.finish().unwrap();
 
-        // Start mini registry
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -267,17 +278,11 @@ Hello, #data.name!
             stream.flush().unwrap();
         });
 
-        // Clean up cached package
-        if let Some(cache_dir) = dirs::cache_dir() {
-            let pkg_dir = cache_dir.join("typst/packages/test-local/test-hello/0.1.0");
-            std::fs::remove_dir_all(&pkg_dir).ok();
-        }
+        cleanup_test_package_cache();
 
-        // Create engine with custom registry
-        let registry = format!("http://127.0.0.1:{}", port);
-        let engine = TypstJavaEngine::new(true, Some(registry));
+        TEST_SERVER_PORT.store(port, Ordering::Relaxed);
+        let engine = TypstJavaEngine::new(true, test_resolve);
 
-        // Compile a template that imports from the custom registry
         let source = r#"#import "@test-local/test-hello:0.1.0": greet
 #greet("Typst")
 "#;
@@ -285,11 +290,7 @@ Hello, #data.name!
         assert!(result.is_ok(), "Compile with custom registry package should succeed");
         assert!(result.pdf_data().is_some(), "Should produce PDF");
 
-        // Clean up
-        if let Some(cache_dir) = dirs::cache_dir() {
-            let pkg_dir = cache_dir.join("typst/packages/test-local/test-hello/0.1.0");
-            std::fs::remove_dir_all(&pkg_dir).ok();
-        }
+        cleanup_test_package_cache();
         server.join().unwrap();
     }
 }

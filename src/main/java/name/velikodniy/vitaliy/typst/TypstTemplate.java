@@ -90,6 +90,7 @@ public final class TypstTemplate {
         MemorySegment resultPtr = null;
 
         try (var arena = Arena.ofConfined()) {
+            TypstNative.setCompileContext(engine.packageManager(), arena);
             resultPtr = TypstNative.compile(arena, enginePtr, templateKey, source, dataJson);
 
             if (resultPtr == null || resultPtr.equals(MemorySegment.NULL)) {
@@ -110,6 +111,7 @@ public final class TypstTemplate {
             }
             return pdf;
         } finally {
+            TypstNative.clearCompileContext();
             if (resultPtr != null && !resultPtr.equals(MemorySegment.NULL)) {
                 TypstNative.resultFree(resultPtr);
             }
@@ -194,7 +196,7 @@ public final class TypstTemplate {
         if (end == valStart) return 0;
         try {
             return Integer.parseInt(json.substring(valStart, end));
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException _) {
             return 0;
         }
     }

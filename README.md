@@ -122,7 +122,6 @@ TypstEngine engine = TypstEngine.builder()
     .addFont(fontBytes)                           // byte[]
     .addFont(inputStream)                         // InputStream (classpath, DB, S3)
     .enableTemplateCache(true)                    // default: true
-    .registry("https://my-registry.example.com") // custom package registry
     .build();
 ```
 
@@ -231,9 +230,13 @@ Templates work in [typst.app](https://typst.app) with a manually provided `data.
 
 Typst packages from [packages.typst.org](https://packages.typst.org) are supported and downloaded on demand.
 
-### Custom Package Registry
+### Package Resolution
 
-By default, packages are fetched from `https://packages.typst.org`. To use a private or mirrored registry:
+Typst packages are downloaded on demand from `https://packages.typst.org` and cached locally. No configuration required — it works out of the box.
+
+For advanced use cases you can optionally customize how packages are fetched:
+
+**Custom registry URL** — redirect downloads to a mirror or private registry:
 
 ```java
 var engine = TypstEngine.builder()
@@ -241,7 +244,27 @@ var engine = TypstEngine.builder()
     .build();
 ```
 
-The registry URL replaces the default for all package downloads. The expected URL format is `{registry}/{namespace}/{name}-{version}.tar.gz`.
+**Custom resolver** — implement `TypstPackageResolver` to fetch packages from any source:
+
+```java
+// From local filesystem
+var engine = TypstEngine.builder()
+    .packageResolver((namespace, name, version) ->
+        Files.readAllBytes(
+            Path.of("/packages", namespace, name + "-" + version + ".tar.gz")))
+    .build();
+
+// From S3
+var engine = TypstEngine.builder()
+    .packageResolver((namespace, name, version) ->
+        s3Client.getObjectAsBytes(req -> req
+            .bucket("typst-packages")
+            .key(namespace + "/" + name + "-" + version + ".tar.gz"))
+        .asByteArray())
+    .build();
+```
+
+The resolver is a `@FunctionalInterface` that receives package coordinates (`namespace`, `name`, `version`) and returns the archive as `tar.gz` bytes. The engine handles unpacking and disk caching automatically. Throw `TypstPackageNotFoundException` if the package does not exist.
 
 ## Architecture
 
@@ -265,7 +288,12 @@ libtypst_java.so/dylib/dll (Rust shared library)
     |--- Font book (typst-assets, embedded)
     |--- Template cache (RwLock<HashMap>)
     |--- Virtual filesystem (data.json injection)
-    |--- Package resolver (configurable registry)
+    |--- Package resolver (upcall to Java)
+         |
+         v
+    TypstPackageResolver (Java, pluggable)
+         |--- HttpPackageResolver (default, packages.typst.org)
+         |--- Custom: S3, filesystem, database, etc.
 ```
 
 ## Building from Source
