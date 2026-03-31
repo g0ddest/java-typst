@@ -103,7 +103,7 @@ jobs:
           path: target/classes/native/${{ matrix.platform }}
 
       - name: Run Java tests
-        run: mvn test -B -Dexec.skip=true
+        run: mvn test -B "-Dexec.skip=true"
 
   quality-gate:
     needs: [ build-native, test-java ]
