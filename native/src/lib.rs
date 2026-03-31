@@ -21,25 +21,29 @@ use crate::result::TypstResult;
 /// Returns a heap-allocated engine pointer. Must be freed with `typst_engine_free`.
 #[no_mangle]
 pub extern "C" fn typst_engine_new(config_json: *const c_char) -> *mut TypstJavaEngine {
-    let cache_enabled = if config_json.is_null() {
-        true
+    let (cache_enabled, registry) = if config_json.is_null() {
+        (true, None)
     } else {
         let c_str = unsafe { CStr::from_ptr(config_json) };
         match c_str.to_str() {
             Ok(s) => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                    v.get("template_cache_enabled")
+                    let cache = v.get("template_cache_enabled")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or(true)
+                        .unwrap_or(true);
+                    let reg = v.get("registry")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_end_matches('/').to_string());
+                    (cache, reg)
                 } else {
-                    true
+                    (true, None)
                 }
             }
-            Err(_) => true,
+            Err(_) => (true, None),
         }
     };
 
-    let engine = TypstJavaEngine::new(cache_enabled);
+    let engine = TypstJavaEngine::new(cache_enabled, registry);
     Box::into_raw(Box::new(engine))
 }
 
