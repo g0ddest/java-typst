@@ -67,7 +67,7 @@ jobs:
       - name: Run Rust tests
         if: ${{ !matrix.cross }}
         working-directory: native
-        run: cargo test --release --target ${{ matrix.target }}
+        run: cargo test
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
@@ -140,7 +140,8 @@ jobs:
         run: >-
           mvn verify sonar:sonar -B
           -Dexec.skip=true
-          -Dsonar.projectKey=${{ github.repository_owner }}_typst-java
+          -Dsonar.projectKey=${{ github.repository_owner }}_java-typst
           -Dsonar.organization=${{ github.repository_owner }}
           -Dsonar.host.url=https://sonarcloud.io
+          ${{ github.event_name == 'push' && format('-Dsonar.branch.name={0}', github.ref_name) || '' }}
           -Dsonar.branch.name=main
