@@ -243,57 +243,16 @@ public final class DataSerializer {
 
         /**
          * Parse top-level keys from a raw JSON object string and merge them.
-         * Only supports flat or nested JSON objects at the top level.
+         * Nested arrays and objects in values are preserved.
          *
          * @param json the raw JSON object string to parse and merge
          */
         public void putRawJson(String json) {
-            // Minimal JSON object parser: extract top-level key-value pairs
             json = json.trim();
             if (!json.startsWith("{") || !json.endsWith("}")) {
                 throw new IllegalArgumentException("putRawJson expects a JSON object");
             }
-            // Strip outer braces
-            String inner = json.substring(1, json.length() - 1).trim();
-            if (inner.isEmpty()) return;
-
-            int pos = 0;
-            while (pos < inner.length()) {
-                // Skip whitespace
-                pos = skipWhitespace(inner, pos);
-                if (pos >= inner.length()) break;
-
-                // Parse key
-                if (inner.charAt(pos) != '"') {
-                    throw new IllegalArgumentException("Expected '\"' at position " + pos);
-                }
-                int keyStart = pos + 1;
-                int keyEnd = findClosingQuote(inner, keyStart);
-                String key = inner.substring(keyStart, keyEnd);
-                pos = keyEnd + 1;
-
-                // Skip colon
-                pos = skipWhitespace(inner, pos);
-                if (pos >= inner.length() || inner.charAt(pos) != ':') {
-                    throw new IllegalArgumentException("Expected ':' at position " + pos);
-                }
-                pos++;
-                pos = skipWhitespace(inner, pos);
-
-                // Parse value as raw string — find its extent
-                int valueStart = pos;
-                pos = skipJsonValue(inner, pos);
-                String rawValue = inner.substring(valueStart, pos).trim();
-
-                // Convert raw value to Java object
-                data.put(key, parseJsonValue(rawValue));
-
-                // Skip comma
-                pos = skipWhitespace(inner, pos);
-                if (pos < inner.length() && inner.charAt(pos) == ',') {
-                    pos++;
-                }
-            }
+            data.putAll(parseJsonObject(json));
         }
 
         /**
@@ -416,16 +375,21 @@ public final class DataSerializer {
         }
 
         private static Object parseJsonValue(String raw) {
-            if (raw.startsWith("\"")) {
-                // String — remove quotes and unescape
+            if (raw.isEmpty()) throw new IllegalArgumentException("Empty JSON value");
+            char first = raw.charAt(0);
+            if (first == '"') {
                 return unescapeJsonString(raw.substring(1, raw.length() - 1));
+            } else if (first == '[') {
+                return parseJsonArray(raw);
+            } else if (first == '{') {
+                return parseJsonObject(raw);
             } else if (raw.equals("null")) {
                 return null;
             } else if (raw.equals("true")) {
                 return true;
             } else if (raw.equals("false")) {
                 return false;
-            } else if (raw.contains(".")) {
+            } else if (raw.contains(".") || raw.contains("e") || raw.contains("E")) {
                 return Double.parseDouble(raw);
             } else {
                 long l = Long.parseLong(raw);
@@ -434,6 +398,53 @@ public final class DataSerializer {
                 }
                 return l;
             }
+        }
+
+        private static List<Object> parseJsonArray(String raw) {
+            String inner = raw.substring(1, raw.length() - 1).trim();
+            var list = new ArrayList<Object>();
+            if (inner.isEmpty()) return list;
+            int pos = 0;
+            while (pos < inner.length()) {
+                pos = skipWhitespace(inner, pos);
+                if (pos >= inner.length()) break;
+                int valueStart = pos;
+                pos = skipJsonValue(inner, pos);
+                list.add(parseJsonValue(inner.substring(valueStart, pos).trim()));
+                pos = skipWhitespace(inner, pos);
+                if (pos < inner.length() && inner.charAt(pos) == ',') pos++;
+            }
+            return list;
+        }
+
+        private static LinkedHashMap<String, Object> parseJsonObject(String raw) {
+            String inner = raw.substring(1, raw.length() - 1).trim();
+            var map = new LinkedHashMap<String, Object>();
+            if (inner.isEmpty()) return map;
+            int pos = 0;
+            while (pos < inner.length()) {
+                pos = skipWhitespace(inner, pos);
+                if (pos >= inner.length()) break;
+                if (inner.charAt(pos) != '"') {
+                    throw new IllegalArgumentException("Expected '\"' at position " + pos);
+                }
+                int keyStart = pos + 1;
+                int keyEnd = findClosingQuote(inner, keyStart);
+                String key = inner.substring(keyStart, keyEnd);
+                pos = keyEnd + 1;
+                pos = skipWhitespace(inner, pos);
+                if (pos >= inner.length() || inner.charAt(pos) != ':') {
+                    throw new IllegalArgumentException("Expected ':' at position " + pos);
+                }
+                pos++;
+                pos = skipWhitespace(inner, pos);
+                int valueStart = pos;
+                pos = skipJsonValue(inner, pos);
+                map.put(key, parseJsonValue(inner.substring(valueStart, pos).trim()));
+                pos = skipWhitespace(inner, pos);
+                if (pos < inner.length() && inner.charAt(pos) == ',') pos++;
+            }
+            return map;
         }
     }
 }
