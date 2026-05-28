@@ -127,6 +127,38 @@ class DataSerializerTest {
             assertTrue(json.contains("\"msg\":\"hello\\nworld\""));
             assertTrue(json.contains("\"path\":\"c:\\\\dir\""));
         }
+        @Test void mergesRawJsonWithArrayValue() {
+            var b = new DataSerializer.Builder();
+            b.putRawJson("{\"x\":42,\"y\":[1]}");
+            String json = b.toJson();
+            assertTrue(json.contains("\"x\":42"));
+            assertTrue(json.contains("\"y\":[1]"));
+        }
+        @Test void mergesRawJsonWithMixedArrayValues() {
+            var b = new DataSerializer.Builder();
+            b.putRawJson("{\"items\":[1,2,3],\"flags\":[true,false,null],\"names\":[\"a\",\"b\"]}");
+            String json = b.toJson();
+            assertTrue(json.contains("\"items\":[1,2,3]"));
+            assertTrue(json.contains("\"flags\":[true,false,null]"));
+            assertTrue(json.contains("\"names\":[\"a\",\"b\"]"));
+        }
+        @Test void mergesRawJsonWithNestedObjectValue() {
+            var b = new DataSerializer.Builder();
+            b.putRawJson("{\"point\":{\"x\":1,\"y\":2}}");
+            assertEquals("{\"point\":{\"x\":1,\"y\":2}}", b.toJson());
+        }
+        @Test void mergesRawJsonWithArrayOfObjects() {
+            var b = new DataSerializer.Builder();
+            b.putRawJson("{\"rows\":[{\"a\":1},{\"a\":2}]}");
+            assertEquals("{\"rows\":[{\"a\":1},{\"a\":2}]}", b.toJson());
+        }
+        @Test void mergesRawJsonWithEmptyArrayAndObject() {
+            var b = new DataSerializer.Builder();
+            b.putRawJson("{\"empty_arr\":[],\"empty_obj\":{}}");
+            String json = b.toJson();
+            assertTrue(json.contains("\"empty_arr\":[]"));
+            assertTrue(json.contains("\"empty_obj\":{}"));
+        }
     }
 
     @Nested
