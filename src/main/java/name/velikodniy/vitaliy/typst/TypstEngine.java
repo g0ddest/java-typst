@@ -7,12 +7,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.ref.Cleaner;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * High-level Typst compilation engine. Manages the native engine lifecycle,
@@ -31,13 +33,40 @@ import java.util.concurrent.atomic.AtomicReference;
  * }</pre>
  *
  * <p>Implements {@link AutoCloseable} to ensure the native engine is freed.
+ *
+ * <h2>Thread safety</h2>
+ * <ul>
+ *   <li>{@code TypstEngine} instances are thread-safe; a single engine can (and
+ *       should) be shared across request threads. Concurrent renders proceed in
+ *       parallel — they take a shared read lock against the engine pointer.</li>
+ *   <li>{@link TypstTemplate} instances are <em>not</em> thread-safe. Create a
+ *       new template (via {@link #template(Path)} or {@link #template(String, String)})
+ *       per render call.</li>
+ *   <li>{@link #close()} acquires an exclusive write lock, so it blocks until
+ *       all in-flight renders complete and prevents new renders from starting.
+ *       After {@code close()} returns, further calls into the engine throw
+ *       {@link TypstEngineException}.</li>
+ *   <li>If the user forgets to {@code close()} the engine, a {@link Cleaner}
+ *       registration releases the native engine when the {@code TypstEngine}
+ *       object becomes phantom-reachable. Explicit {@code close()} remains
+ *       strongly preferred — Cleaner timing is non-deterministic.</li>
+ *   <li>If a custom {@link TypstPackageResolver} throws during a render, the
+ *       original exception (e.g. {@link java.io.IOException},
+ *       {@link TypstPackageNotFoundException}) is preserved and surfaced
+ *       through {@link TypstTemplate#renderPdf()} rather than being collapsed
+ *       into a generic Typst diagnostic.</li>
+ * </ul>
  */
 public final class TypstEngine implements AutoCloseable {
+
+    private static final Cleaner CLEANER = Cleaner.create();
 
     private final AtomicReference<MemorySegment> enginePtr;
     private final Arena nativeArena;
     private final PackageManager packageManager;
     private final AutoCloseable resolver;
+    private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
+    private final Cleaner.Cleanable cleanable;
 
     private TypstEngine(MemorySegment enginePtr, Arena nativeArena,
                         PackageManager packageManager, AutoCloseable resolver) {
@@ -45,6 +74,10 @@ public final class TypstEngine implements AutoCloseable {
         this.nativeArena = nativeArena;
         this.packageManager = packageManager;
         this.resolver = resolver;
+        // Register a cleanup hook for the case where the user forgets close().
+        // The runnable must NOT capture `this`, only the state it needs.
+        this.cleanable = CLEANER.register(this,
+                new CleanupState(this.enginePtr, this.nativeArena, this.resolver));
     }
 
     /**
@@ -99,9 +132,14 @@ public final class TypstEngine implements AutoCloseable {
      */
     public void invalidateTemplate(String key) {
         Objects.requireNonNull(key, "key must not be null");
-        MemorySegment ptr = getEnginePtr();
-        try (var localArena = Arena.ofConfined()) {
-            TypstNative.invalidateTemplate(localArena, ptr, key);
+        lifecycleLock.readLock().lock();
+        try {
+            MemorySegment ptr = getEnginePtr();
+            try (var localArena = Arena.ofConfined()) {
+                TypstNative.invalidateTemplate(localArena, ptr, key);
+            }
+        } finally {
+            lifecycleLock.readLock().unlock();
         }
     }
 
@@ -109,7 +147,12 @@ public final class TypstEngine implements AutoCloseable {
      * Invalidate all cached templates.
      */
     public void invalidateAllTemplates() {
-        TypstNative.invalidateAll(getEnginePtr());
+        lifecycleLock.readLock().lock();
+        try {
+            TypstNative.invalidateAll(getEnginePtr());
+        } finally {
+            lifecycleLock.readLock().unlock();
+        }
     }
 
     /**
@@ -126,14 +169,39 @@ public final class TypstEngine implements AutoCloseable {
         return packageManager;
     }
 
+    /**
+     * Package-private: lock used by {@link TypstTemplate#renderPdf()} to keep
+     * the native engine pointer alive for the duration of a compile() call.
+     * Multiple renders may hold the read lock concurrently.
+     */
+    ReentrantReadWriteLock.ReadLock readLock() {
+        return lifecycleLock.readLock();
+    }
+
+    /**
+     * Package-private: lock acquired by {@link #close()} to block until all
+     * in-flight renders finish before freeing the native engine.
+     */
+    ReentrantReadWriteLock.WriteLock writeLock() {
+        return lifecycleLock.writeLock();
+    }
+
     @Override
     public void close() {
-        MemorySegment ptr = enginePtr.getAndSet(null);
-        if (ptr != null) {
-            TypstNative.engineFree(ptr);
-            nativeArena.close();
-            try { resolver.close(); } catch (Exception _) { /* ignore */ }
+        // Block until in-flight renders complete; new renders see a closed engine.
+        lifecycleLock.writeLock().lock();
+        try {
+            MemorySegment ptr = enginePtr.getAndSet(null);
+            if (ptr != null) {
+                TypstNative.engineFree(ptr);
+                nativeArena.close();
+                try { resolver.close(); } catch (Exception _) { /* ignore */ }
+            }
+        } finally {
+            lifecycleLock.writeLock().unlock();
         }
+        // Deregister the cleaner now that we've cleaned up explicitly.
+        cleanable.clean();
     }
 
     private MemorySegment getEnginePtr() {
@@ -142,6 +210,32 @@ public final class TypstEngine implements AutoCloseable {
             throw new TypstEngineException("Engine is already closed");
         }
         return ptr;
+    }
+
+    /**
+     * Cleaner-invoked fallback that releases the native engine if the user
+     * forgot {@link #close()}. Must not hold a reference to the enclosing
+     * {@code TypstEngine} instance or the Cleaner registration would pin it
+     * forever.
+     */
+    private record CleanupState(AtomicReference<MemorySegment> enginePtr,
+                                Arena nativeArena,
+                                AutoCloseable resolver) implements Runnable {
+        @Override
+        public void run() {
+            MemorySegment ptr = enginePtr.getAndSet(null);
+            if (ptr != null) {
+                try {
+                    TypstNative.engineFree(ptr);
+                } catch (Throwable _) { /* best-effort cleanup */ }
+                try {
+                    nativeArena.close();
+                } catch (Throwable _) { /* best-effort cleanup */ }
+                try {
+                    resolver.close();
+                } catch (Exception _) { /* best-effort cleanup */ }
+            }
+        }
     }
 
     /**
@@ -242,7 +336,10 @@ public final class TypstEngine implements AutoCloseable {
          * @throws TypstEngineException if engine creation or font loading fails
          */
         public TypstEngine build() {
-            Arena arena = Arena.ofConfined();
+            // Shared (not confined): the engine is shareable across threads, the
+            // resolver upcall stub bound to this arena is invoked on arbitrary
+            // render threads, and close()/the Cleaner may run on any thread.
+            Arena arena = Arena.ofShared();
             String config = "{\"template_cache_enabled\":" + templateCacheEnabled + "}";
             TypstPackageResolver resolver = this.packageResolver != null
                     ? this.packageResolver
