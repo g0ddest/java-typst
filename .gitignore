@@ -3,7 +3,7 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 native/target/
-native/Cargo.lock
+src/main/resources/native/
 .kotlin
 
 ### IntelliJ IDEA ###
