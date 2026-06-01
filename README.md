@@ -244,7 +244,7 @@ var engine = TypstEngine.builder()
     .build();
 ```
 
-**Custom resolver** — implement `TypstPackageResolver` to fetch packages from any source:
+**Custom resolver** — implement `TypstPackageResolver` to fetch packages from any source. The SPI declares `throws IOException`, so lambdas can call checked-IO APIs directly:
 
 ```java
 // From local filesystem
@@ -264,7 +264,7 @@ var engine = TypstEngine.builder()
     .build();
 ```
 
-The resolver is a `@FunctionalInterface` that receives package coordinates (`namespace`, `name`, `version`) and returns the archive as `tar.gz` bytes. The engine handles unpacking and disk caching automatically. Throw `TypstPackageNotFoundException` if the package does not exist.
+The resolver is a `@FunctionalInterface` that receives package coordinates (`namespace`, `name`, `version`) and returns the archive as `tar.gz` bytes. The engine handles unpacking and disk caching automatically. Throw `TypstPackageNotFoundException` if the package does not exist; any other `IOException` is propagated to the caller.
 
 ## Architecture
 

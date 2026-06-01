@@ -115,6 +115,11 @@ public final class TypstNative {
     private static final ThreadLocal<PackageManager> ACTIVE_PACKAGE_MANAGER = new ThreadLocal<>();
     private static final ThreadLocal<Arena> COMPILE_ARENA = new ThreadLocal<>();
 
+    // Stashes any Throwable raised inside the resolver upcall so the caller of
+    // compile() can re-throw the original exception instead of seeing a generic
+    // "package not found" diagnostic from the native side.
+    private static final ThreadLocal<Throwable> RESOLVER_EXCEPTION = new ThreadLocal<>();
+
     /**
      * Set the per-thread context for a compilation call.
      * Must be called before each native compilation.
@@ -133,6 +138,20 @@ public final class TypstNative {
     public static void clearCompileContext() {
         ACTIVE_PACKAGE_MANAGER.remove();
         COMPILE_ARENA.remove();
+        RESOLVER_EXCEPTION.remove();
+    }
+
+    /**
+     * Return any Throwable thrown by the resolver upcall during the most recent
+     * compile() on this thread, clearing the slot. Returns {@code null} if no
+     * resolver exception occurred.
+     */
+    public static Throwable getAndClearResolverException() {
+        Throwable t = RESOLVER_EXCEPTION.get();
+        if (t != null) {
+            RESOLVER_EXCEPTION.remove();
+        }
+        return t;
     }
 
     /**
@@ -148,20 +167,39 @@ public final class TypstNative {
             PackageManager pm = ACTIVE_PACKAGE_MANAGER.get();
             if (pm == null) return -1;
 
+            // Guard against null pointers from native: dereferencing NULL via
+            // getString would crash the JVM rather than throw.
+            if (nsPtr.equals(MemorySegment.NULL)
+                    || namePtr.equals(MemorySegment.NULL)
+                    || versionPtr.equals(MemorySegment.NULL)
+                    || outPathPtr.equals(MemorySegment.NULL)) {
+                return -1;
+            }
+
+            // The resolved path must be allocated in the per-compile arena, which
+            // lives until native code copies it. Without it there is no arena that
+            // is both reachable by native and guaranteed alive past this call, so
+            // an Arena.ofAuto() segment could be GC'd before Rust reads it (UAF).
+            Arena arena = COMPILE_ARENA.get();
+            if (arena == null) return -1;
+
             String ns = nsPtr.reinterpret(Long.MAX_VALUE).getString(0);
             String name = namePtr.reinterpret(Long.MAX_VALUE).getString(0);
             String version = versionPtr.reinterpret(Long.MAX_VALUE).getString(0);
 
             String path = pm.resolveToPath(ns, name, version);
 
-            Arena arena = COMPILE_ARENA.get();
-            MemorySegment pathSeg = (arena != null ? arena : Arena.ofAuto()).allocateFrom(path);
+            MemorySegment pathSeg = arena.allocateFrom(path);
             outPathPtr.reinterpret(ValueLayout.ADDRESS.byteSize())
                     .set(ValueLayout.ADDRESS, 0, pathSeg);
             return 0;
-        } catch (TypstPackageNotFoundException _) {
+        } catch (TypstPackageNotFoundException e) {
+            RESOLVER_EXCEPTION.set(e);
             return 1;
-        } catch (Exception _) {
+        } catch (Throwable t) {
+            // Preserve the original exception so the Java caller can surface it
+            // instead of a generic native-side "package not found" diagnostic.
+            RESOLVER_EXCEPTION.set(t);
             return -1;
         }
     }

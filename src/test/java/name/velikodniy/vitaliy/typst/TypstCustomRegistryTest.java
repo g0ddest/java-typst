@@ -103,7 +103,10 @@ class TypstCustomRegistryTest {
                     #foo()
                     """;
 
-            assertThrows(TypstCompilationException.class, () ->
+            // The resolver throws TypstPackageNotFoundException; that original
+            // exception is surfaced to the caller rather than being collapsed
+            // into a generic compilation diagnostic.
+            assertThrows(TypstPackageNotFoundException.class, () ->
                     engine.template("missing-pkg", source).renderPdf());
         }
     }

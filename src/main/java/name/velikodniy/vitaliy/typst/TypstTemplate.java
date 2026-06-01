@@ -86,12 +86,30 @@ public final class TypstTemplate {
      */
     public byte[] renderPdf() {
         String dataJson = dataBuilder.toJson();
-        MemorySegment enginePtr = engine.enginePtr();
         MemorySegment resultPtr = null;
 
+        // Hold the engine's read lock for the duration of the native call so
+        // a concurrent close() cannot free the engine while compile() runs.
+        engine.readLock().lock();
         try (var arena = Arena.ofConfined()) {
+            MemorySegment enginePtr = engine.enginePtr();
             TypstNative.setCompileContext(engine.packageManager(), arena);
             resultPtr = TypstNative.compile(arena, enginePtr, templateKey, source, dataJson);
+
+            // If the resolver upcall threw, surface the original exception
+            // BEFORE looking at the compilation diagnostics — otherwise the
+            // user just sees a generic "package not found" message.
+            Throwable resolverErr = TypstNative.getAndClearResolverException();
+            if (resolverErr != null) {
+                if (resolverErr instanceof TypstException te) {
+                    throw te;
+                }
+                if (resolverErr instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new TypstEngineException(
+                        "Package resolver failed: " + resolverErr.getMessage(), resolverErr);
+            }
 
             if (resultPtr == null || resultPtr.equals(MemorySegment.NULL)) {
                 throw new TypstNativeException("Compilation returned null result");
@@ -115,6 +133,7 @@ public final class TypstTemplate {
             if (resultPtr != null && !resultPtr.equals(MemorySegment.NULL)) {
                 TypstNative.resultFree(resultPtr);
             }
+            engine.readLock().unlock();
         }
     }
 

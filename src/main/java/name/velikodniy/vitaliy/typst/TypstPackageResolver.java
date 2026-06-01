@@ -1,5 +1,7 @@
 package name.velikodniy.vitaliy.typst;
 
+import java.io.IOException;
+
 /**
  * Resolves Typst packages by their coordinates.
  *
@@ -40,6 +42,7 @@ public interface TypstPackageResolver {
      * @param version   package version (e.g. "0.3.1")
      * @return package archive bytes in tar.gz format
      * @throws TypstPackageNotFoundException if the package does not exist
+     * @throws IOException                   if the package cannot be fetched
      */
-    byte[] resolve(String namespace, String name, String version);
+    byte[] resolve(String namespace, String name, String version) throws IOException;
 }
