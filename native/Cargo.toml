@@ -1,6 +1,6 @@
 [package]
 name = "typst-java"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 
 [lib]
@@ -25,3 +25,8 @@ dirs = "6"
 lto = true
 codegen-units = 1
 strip = true
+# NOTE: do NOT set `panic = "abort"`. This crate is a cdylib loaded into the
+# JVM; a panic unwinding across the FFI boundary is undefined behaviour, and
+# `abort` would instead take down the whole host JVM. Every `extern "C"` entry
+# point in lib.rs catches panics via `catch_unwind` and converts them to an
+# error result/code, which only works under the default `unwind` strategy.

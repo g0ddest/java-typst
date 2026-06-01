@@ -8,11 +8,30 @@ mod packages;
 mod result;
 
 use std::ffi::{CStr, c_char, c_int};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use crate::engine::TypstJavaEngine;
 use crate::packages::ResolveFn;
 use crate::result::TypstResult;
+
+/// Run an FFI entry-point body, catching any panic so it never unwinds across
+/// the C ABI boundary (which would be undefined behaviour). On panic, `fallback`
+/// produces the value returned to the caller. Raw pointers captured by `f` are
+/// not `UnwindSafe`, hence `AssertUnwindSafe`; this is sound because on panic we
+/// discard `f`'s partial work and `parking_lot` locks do not poison.
+#[inline]
+fn ffi_guard<T>(f: impl FnOnce() -> T, fallback: impl FnOnce() -> T) -> T {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(_) => fallback(),
+    }
+}
+
+/// JSON for a generic internal-panic error, used as the compile fallback.
+fn panic_error_json() -> String {
+    r#"[{"severity":"ERROR","message":"internal panic during compilation","file":"","line":0,"column":0,"hint":null}]"#.to_string()
+}
 
 /// Create a new Typst engine.
 ///
@@ -27,36 +46,40 @@ pub extern "C" fn typst_engine_new(
     config_json: *const c_char,
     download_fn: ResolveFn,
 ) -> *mut TypstJavaEngine {
-    let cache_enabled = if config_json.is_null() {
-        true
-    } else {
-        let c_str = unsafe { CStr::from_ptr(config_json) };
-        match c_str.to_str() {
-            Ok(s) => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                    v.get("template_cache_enabled")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true)
-                } else {
-                    true
+    ffi_guard(|| {
+        let cache_enabled = if config_json.is_null() {
+            true
+        } else {
+            let c_str = unsafe { CStr::from_ptr(config_json) };
+            match c_str.to_str() {
+                Ok(s) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                        v.get("template_cache_enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true)
+                    } else {
+                        true
+                    }
                 }
+                Err(_) => true,
             }
-            Err(_) => true,
-        }
-    };
+        };
 
-    let engine = TypstJavaEngine::new(cache_enabled, download_fn);
-    Box::into_raw(Box::new(engine))
+        let engine = TypstJavaEngine::new(cache_enabled, download_fn);
+        Box::into_raw(Box::new(engine))
+    }, ptr::null_mut)
 }
 
 /// Free a Typst engine.
 #[no_mangle]
 pub extern "C" fn typst_engine_free(engine: *mut TypstJavaEngine) {
-    if !engine.is_null() {
-        unsafe {
-            drop(Box::from_raw(engine));
+    ffi_guard(|| {
+        if !engine.is_null() {
+            unsafe {
+                drop(Box::from_raw(engine));
+            }
         }
-    }
+    }, || ());
 }
 
 /// Add a font from raw byte data.
@@ -67,12 +90,14 @@ pub extern "C" fn typst_add_font(
     buf: *const u8,
     len: usize,
 ) -> c_int {
-    if engine.is_null() || buf.is_null() || len == 0 {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let data = unsafe { std::slice::from_raw_parts(buf, len) };
-    engine.add_font(data)
+    ffi_guard(|| {
+        if engine.is_null() || buf.is_null() || len == 0 {
+            return -1;
+        }
+        let engine = unsafe { &*engine };
+        let data = unsafe { std::slice::from_raw_parts(buf, len) };
+        engine.add_font(data)
+    }, || -1)
 }
 
 /// Add all fonts from a directory.
@@ -82,15 +107,17 @@ pub extern "C" fn typst_add_font_dir(
     engine: *mut TypstJavaEngine,
     path: *const c_char,
 ) -> c_int {
-    if engine.is_null() || path.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let c_str = unsafe { CStr::from_ptr(path) };
-    match c_str.to_str() {
-        Ok(s) => engine.add_font_dir(s),
-        Err(_) => -1,
-    }
+    ffi_guard(|| {
+        if engine.is_null() || path.is_null() {
+            return -1;
+        }
+        let engine = unsafe { &*engine };
+        let c_str = unsafe { CStr::from_ptr(path) };
+        match c_str.to_str() {
+            Ok(s) => engine.add_font_dir(s),
+            Err(_) => -1,
+        }
+    }, || -1)
 }
 
 /// Compile a template.
@@ -107,64 +134,72 @@ pub extern "C" fn typst_compile(
     source: *const c_char,
     data_json: *const c_char,
 ) -> *mut TypstResult {
-    if engine.is_null() || template_key.is_null() {
-        let result = TypstResult::failure(
-            r#"[{"severity":"ERROR","message":"null pointer passed to typst_compile","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
-            "[]".to_string(),
-        );
-        return Box::into_raw(Box::new(result));
-    }
-
-    let engine = unsafe { &*engine };
-
-    let key = match unsafe { CStr::from_ptr(template_key) }.to_str() {
-        Ok(s) => s,
-        Err(_) => {
+    ffi_guard(|| {
+        if engine.is_null() || template_key.is_null() {
             let result = TypstResult::failure(
-                r#"[{"severity":"ERROR","message":"invalid UTF-8 in template_key","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
+                r#"[{"severity":"ERROR","message":"null pointer passed to typst_compile","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
                 "[]".to_string(),
             );
             return Box::into_raw(Box::new(result));
         }
-    };
 
-    let source_str = if source.is_null() {
-        None
-    } else {
-        match unsafe { CStr::from_ptr(source) }.to_str() {
-            Ok(s) => Some(s),
+        let engine = unsafe { &*engine };
+
+        let key = match unsafe { CStr::from_ptr(template_key) }.to_str() {
+            Ok(s) => s,
             Err(_) => {
                 let result = TypstResult::failure(
-                    r#"[{"severity":"ERROR","message":"invalid UTF-8 in source","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
+                    r#"[{"severity":"ERROR","message":"invalid UTF-8 in template_key","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
                     "[]".to_string(),
                 );
                 return Box::into_raw(Box::new(result));
             }
-        }
-    };
+        };
 
-    let data_str = if data_json.is_null() {
-        None
-    } else {
-        match unsafe { CStr::from_ptr(data_json) }.to_str() {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        }
-    };
+        let source_str = if source.is_null() {
+            None
+        } else {
+            match unsafe { CStr::from_ptr(source) }.to_str() {
+                Ok(s) => Some(s),
+                Err(_) => {
+                    let result = TypstResult::failure(
+                        r#"[{"severity":"ERROR","message":"invalid UTF-8 in source","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
+                        "[]".to_string(),
+                    );
+                    return Box::into_raw(Box::new(result));
+                }
+            }
+        };
 
-    let result = engine.compile(key, source_str, data_str);
-    Box::into_raw(Box::new(result))
+        let data_str = if data_json.is_null() {
+            None
+        } else {
+            match unsafe { CStr::from_ptr(data_json) }.to_str() {
+                Ok(s) => Some(s),
+                Err(_) => None,
+            }
+        };
+
+        let result = engine.compile(key, source_str, data_str);
+        Box::into_raw(Box::new(result))
+    }, || {
+        // A panic deep inside typst/typst-pdf must surface as an error result,
+        // never as a JVM-killing abort or an unwind across the C ABI.
+        Box::into_raw(Box::new(TypstResult::failure(panic_error_json(), "[]".to_string())))
+    })
 }
 
 /// Check if a compilation result is successful.
 /// Returns 1 for success, 0 for failure.
 #[no_mangle]
 pub extern "C" fn typst_result_is_ok(result: *const TypstResult) -> c_int {
-    if result.is_null() {
-        return 0;
-    }
-    let result = unsafe { &*result };
-    if result.is_ok() { 1 } else { 0 }
+    ffi_guard(|| {
+        if result.is_null() {
+            return 0;
+        }
+        let result = unsafe { &*result };
+        if result.is_ok() { 1 } else { 0 }
+    }, || 0)
 }
 
 /// Get the PDF bytes from a successful result.
@@ -175,59 +210,67 @@ pub extern "C" fn typst_result_pdf(
     result: *const TypstResult,
     out_len: *mut usize,
 ) -> *const u8 {
-    if result.is_null() {
-        if !out_len.is_null() {
-            unsafe { *out_len = 0; }
-        }
-        return ptr::null();
-    }
-    let result = unsafe { &*result };
-    match result.pdf_data() {
-        Some((data, len)) => {
-            if !out_len.is_null() {
-                unsafe { *out_len = len; }
-            }
-            data.as_ptr()
-        }
-        None => {
+    ffi_guard(|| {
+        if result.is_null() {
             if !out_len.is_null() {
                 unsafe { *out_len = 0; }
             }
-            ptr::null()
+            return ptr::null();
         }
-    }
+        let result = unsafe { &*result };
+        match result.pdf_data() {
+            Some((data, len)) => {
+                if !out_len.is_null() {
+                    unsafe { *out_len = len; }
+                }
+                data.as_ptr()
+            }
+            None => {
+                if !out_len.is_null() {
+                    unsafe { *out_len = 0; }
+                }
+                ptr::null()
+            }
+        }
+    }, ptr::null)
 }
 
 /// Get the errors JSON string from a result.
 /// Returns a null-terminated UTF-8 string. The pointer is valid until `typst_result_free`.
 #[no_mangle]
 pub extern "C" fn typst_result_errors(result: *const TypstResult) -> *const c_char {
-    if result.is_null() {
-        return ptr::null();
-    }
-    let result = unsafe { &*result };
-    result.errors_ptr()
+    ffi_guard(|| {
+        if result.is_null() {
+            return ptr::null();
+        }
+        let result = unsafe { &*result };
+        result.errors_ptr()
+    }, ptr::null)
 }
 
 /// Get the warnings JSON string from a result.
 /// Returns a null-terminated UTF-8 string. The pointer is valid until `typst_result_free`.
 #[no_mangle]
 pub extern "C" fn typst_result_warnings(result: *const TypstResult) -> *const c_char {
-    if result.is_null() {
-        return ptr::null();
-    }
-    let result = unsafe { &*result };
-    result.warnings_ptr()
+    ffi_guard(|| {
+        if result.is_null() {
+            return ptr::null();
+        }
+        let result = unsafe { &*result };
+        result.warnings_ptr()
+    }, ptr::null)
 }
 
 /// Free a compilation result.
 #[no_mangle]
 pub extern "C" fn typst_result_free(result: *mut TypstResult) {
-    if !result.is_null() {
-        unsafe {
-            drop(Box::from_raw(result));
+    ffi_guard(|| {
+        if !result.is_null() {
+            unsafe {
+                drop(Box::from_raw(result));
+            }
         }
-    }
+    }, || ());
 }
 
 /// Invalidate a specific cached template.
@@ -236,23 +279,27 @@ pub extern "C" fn typst_invalidate_template(
     engine: *mut TypstJavaEngine,
     key: *const c_char,
 ) {
-    if engine.is_null() || key.is_null() {
-        return;
-    }
-    let engine = unsafe { &*engine };
-    if let Ok(k) = unsafe { CStr::from_ptr(key) }.to_str() {
-        engine.invalidate_template(k);
-    }
+    ffi_guard(|| {
+        if engine.is_null() || key.is_null() {
+            return;
+        }
+        let engine = unsafe { &*engine };
+        if let Ok(k) = unsafe { CStr::from_ptr(key) }.to_str() {
+            engine.invalidate_template(k);
+        }
+    }, || ());
 }
 
 /// Invalidate all cached templates.
 #[no_mangle]
 pub extern "C" fn typst_invalidate_all(engine: *mut TypstJavaEngine) {
-    if engine.is_null() {
-        return;
-    }
-    let engine = unsafe { &*engine };
-    engine.invalidate_all();
+    ffi_guard(|| {
+        if engine.is_null() {
+            return;
+        }
+        let engine = unsafe { &*engine };
+        engine.invalidate_all();
+    }, || ());
 }
 
 #[cfg(test)]
@@ -267,6 +314,18 @@ mod tests {
         _out_path: *mut *const c_char,
     ) -> c_int {
         -1
+    }
+
+    #[test]
+    fn test_ffi_guard_catches_panic_and_returns_fallback() {
+        // A panic inside the guarded closure must be caught and converted to the
+        // fallback value, never unwind across the (simulated) FFI boundary.
+        let value = ffi_guard(|| -> c_int { panic!("boom") }, || -7);
+        assert_eq!(value, -7);
+
+        // The happy path returns the closure's value untouched.
+        let ok = ffi_guard(|| -> c_int { 42 }, || -1);
+        assert_eq!(ok, 42);
     }
 
     #[test]
