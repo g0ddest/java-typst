@@ -31,11 +31,16 @@ public final class DataSerializer {
      */
     public static String toJson(Object value) {
         var sb = new StringBuilder();
-        serialize(value, sb);
+        serialize(value, sb, Collections.newSetFromMap(new IdentityHashMap<>()));
         return sb.toString();
     }
 
-    private static void serialize(Object value, StringBuilder sb) {
+    /**
+     * @param ancestors identity set of containers currently on the recursion
+     *                  stack, used to detect (and reject) circular references
+     *                  without false-positives on shared, acyclic sub-graphs
+     */
+    private static void serialize(Object value, StringBuilder sb, Set<Object> ancestors) {
         switch (value) {
             case null -> sb.append("null");
             case String s -> writeString(s, sb);
@@ -45,17 +50,32 @@ public final class DataSerializer {
             case LocalDate ld -> writeString(ld.toString(), sb);
             case LocalDateTime ldt -> writeString(ldt.format(LOCAL_DATE_TIME_FORMAT), sb);
             case Enum<?> e -> writeString(e.name(), sb);
-            case Map<?, ?> map -> writeMap(map, sb);
-            case Collection<?> coll -> writeCollection(coll, sb);
-            default -> {
-                if (value.getClass().isArray()) {
-                    writeArray(value, sb);
-                } else if (value.getClass().isRecord()) {
-                    writeRecord(value, sb);
-                } else {
-                    writePojo(value, sb);
+            default -> writeContainer(value, sb, ancestors);
+        }
+    }
+
+    private static void writeContainer(Object value, StringBuilder sb, Set<Object> ancestors) {
+        if (!ancestors.add(value)) {
+            throw new TypstEngineException(
+                    "Circular reference detected while serializing "
+                            + value.getClass().getName());
+        }
+        try {
+            switch (value) {
+                case Map<?, ?> map -> writeMap(map, sb, ancestors);
+                case Collection<?> coll -> writeCollection(coll, sb, ancestors);
+                default -> {
+                    if (value.getClass().isArray()) {
+                        writeArray(value, sb, ancestors);
+                    } else if (value.getClass().isRecord()) {
+                        writeRecord(value, sb, ancestors);
+                    } else {
+                        writePojo(value, sb, ancestors);
+                    }
                 }
             }
+        } finally {
+            ancestors.remove(value);
         }
     }
 
@@ -85,18 +105,22 @@ public final class DataSerializer {
 
     private static String numberToString(Number n) {
         if (n instanceof Double d) {
-            // Avoid trailing ".0" for whole numbers? No — Double.toString handles it.
-            // Actually 3.14 -> "3.14", which is correct.
+            if (d.isNaN() || d.isInfinite()) {
+                throw new IllegalArgumentException("Cannot serialize non-finite number to JSON: " + d);
+            }
             return d.toString();
         }
         if (n instanceof Float f) {
+            if (f.isNaN() || f.isInfinite()) {
+                throw new IllegalArgumentException("Cannot serialize non-finite number to JSON: " + f);
+            }
             return f.toString();
         }
         // Integer, Long, Short, Byte — all produce integral strings
         return n.toString();
     }
 
-    private static void writeMap(Map<?, ?> map, StringBuilder sb) {
+    private static void writeMap(Map<?, ?> map, StringBuilder sb, Set<Object> ancestors) {
         sb.append('{');
         boolean first = true;
         for (var entry : map.entrySet()) {
@@ -104,33 +128,33 @@ public final class DataSerializer {
             first = false;
             writeString(String.valueOf(entry.getKey()), sb);
             sb.append(':');
-            serialize(entry.getValue(), sb);
+            serialize(entry.getValue(), sb, ancestors);
         }
         sb.append('}');
     }
 
-    private static void writeCollection(Collection<?> coll, StringBuilder sb) {
+    private static void writeCollection(Collection<?> coll, StringBuilder sb, Set<Object> ancestors) {
         sb.append('[');
         boolean first = true;
         for (var item : coll) {
             if (!first) sb.append(',');
             first = false;
-            serialize(item, sb);
+            serialize(item, sb, ancestors);
         }
         sb.append(']');
     }
 
-    private static void writeArray(Object array, StringBuilder sb) {
+    private static void writeArray(Object array, StringBuilder sb, Set<Object> ancestors) {
         int len = Array.getLength(array);
         sb.append('[');
         for (int i = 0; i < len; i++) {
             if (i > 0) sb.append(',');
-            serialize(Array.get(array, i), sb);
+            serialize(Array.get(array, i), sb, ancestors);
         }
         sb.append(']');
     }
 
-    private static void writeRecord(Object record, StringBuilder sb) {
+    private static void writeRecord(Object record, StringBuilder sb, Set<Object> ancestors) {
         RecordComponent[] components = record.getClass().getRecordComponents();
         sb.append('{');
         for (int i = 0; i < components.length; i++) {
@@ -141,7 +165,7 @@ public final class DataSerializer {
                 var accessor = components[i].getAccessor();
                 accessor.trySetAccessible();
                 Object val = accessor.invoke(record);
-                serialize(val, sb);
+                serialize(val, sb, ancestors);
             } catch (ReflectiveOperationException e) {
                 throw new TypstEngineException("Failed to read record component: " + components[i].getName(), e);
             }
@@ -149,7 +173,7 @@ public final class DataSerializer {
         sb.append('}');
     }
 
-    private static void writePojo(Object pojo, StringBuilder sb) {
+    private static void writePojo(Object pojo, StringBuilder sb, Set<Object> ancestors) {
         var entries = extractPojoEntries(pojo);
         sb.append('{');
         boolean first = true;
@@ -158,7 +182,7 @@ public final class DataSerializer {
             first = false;
             writeString(entry.getKey(), sb);
             sb.append(':');
-            serialize(entry.getValue(), sb);
+            serialize(entry.getValue(), sb, ancestors);
         }
         sb.append('}');
     }
@@ -269,7 +293,7 @@ public final class DataSerializer {
                 first = false;
                 writeString(entry.getKey(), sb);
                 sb.append(':');
-                serialize(entry.getValue(), sb);
+                serialize(entry.getValue(), sb, Collections.newSetFromMap(new IdentityHashMap<>()));
             }
             sb.append('}');
             return sb.toString();

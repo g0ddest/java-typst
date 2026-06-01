@@ -1,7 +1,10 @@
 package name.velikodniy.vitaliy.typst.internal;
 
+import name.velikodniy.vitaliy.typst.TypstEngineException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -120,27 +123,16 @@ class DataSerializerTest {
             String json = b.toJson();
             assertTrue(json.contains("\"a\":1")); assertTrue(json.contains("\"b\":2")); assertTrue(json.contains("\"c\":3"));
         }
-        @Test void mergesRawJsonWithEscapes() {
+        @ParameterizedTest
+        @ValueSource(strings = {
+            "{\"msg\":\"hello\\nworld\",\"path\":\"c:\\\\dir\"}",
+            "{\"x\":42,\"y\":[1]}",
+            "{\"items\":[1,2,3],\"flags\":[true,false,null],\"names\":[\"a\",\"b\"]}"
+        })
+        void mergesRawJsonPreservingValues(String rawJson) {
             var b = new DataSerializer.Builder();
-            b.putRawJson("{\"msg\":\"hello\\nworld\",\"path\":\"c:\\\\dir\"}");
-            String json = b.toJson();
-            assertTrue(json.contains("\"msg\":\"hello\\nworld\""));
-            assertTrue(json.contains("\"path\":\"c:\\\\dir\""));
-        }
-        @Test void mergesRawJsonWithArrayValue() {
-            var b = new DataSerializer.Builder();
-            b.putRawJson("{\"x\":42,\"y\":[1]}");
-            String json = b.toJson();
-            assertTrue(json.contains("\"x\":42"));
-            assertTrue(json.contains("\"y\":[1]"));
-        }
-        @Test void mergesRawJsonWithMixedArrayValues() {
-            var b = new DataSerializer.Builder();
-            b.putRawJson("{\"items\":[1,2,3],\"flags\":[true,false,null],\"names\":[\"a\",\"b\"]}");
-            String json = b.toJson();
-            assertTrue(json.contains("\"items\":[1,2,3]"));
-            assertTrue(json.contains("\"flags\":[true,false,null]"));
-            assertTrue(json.contains("\"names\":[\"a\",\"b\"]"));
+            b.putRawJson(rawJson);
+            assertEquals(rawJson, b.toJson());
         }
         @Test void mergesRawJsonWithNestedObjectValue() {
             var b = new DataSerializer.Builder();
@@ -158,6 +150,35 @@ class DataSerializerTest {
             String json = b.toJson();
             assertTrue(json.contains("\"empty_arr\":[]"));
             assertTrue(json.contains("\"empty_obj\":{}"));
+        }
+    }
+
+    @Nested
+    class Robustness {
+        @Test void throwsOnSelfReferencingList() {
+            var list = new ArrayList<Object>();
+            list.add(list);
+            assertThrows(TypstEngineException.class, () -> DataSerializer.toJson(list));
+        }
+        @Test void throwsOnSelfReferencingMap() {
+            var map = new LinkedHashMap<String, Object>();
+            map.put("self", map);
+            assertThrows(TypstEngineException.class, () -> DataSerializer.toJson(map));
+        }
+        @Test void allowsSameObjectTwiceWhenNotCyclic() {
+            var shared = Map.of("k", "v");
+            var outer = List.of(shared, shared);
+            // A diamond (same object referenced twice, no cycle) must serialize fine.
+            assertEquals("[{\"k\":\"v\"},{\"k\":\"v\"}]", DataSerializer.toJson(outer));
+        }
+        @Test void throwsOnNonFiniteDouble() {
+            assertThrows(IllegalArgumentException.class, () -> DataSerializer.toJson(Double.NaN));
+            assertThrows(IllegalArgumentException.class, () -> DataSerializer.toJson(Double.POSITIVE_INFINITY));
+            assertThrows(IllegalArgumentException.class, () -> DataSerializer.toJson(Double.NEGATIVE_INFINITY));
+        }
+        @Test void throwsOnNonFiniteFloat() {
+            assertThrows(IllegalArgumentException.class, () -> DataSerializer.toJson(Float.NaN));
+            assertThrows(IllegalArgumentException.class, () -> DataSerializer.toJson(Float.POSITIVE_INFINITY));
         }
     }
 
