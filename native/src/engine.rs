@@ -1,6 +1,5 @@
 // Typst compilation engine
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -77,13 +76,13 @@ impl TypstJavaEngine {
         // 2. Determine root directory
         let root = if source.is_some() {
             // String template — use current dir or temp
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
+            std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())
         } else {
             // File template — use the file's parent directory
             let path = std::path::Path::new(template_key);
             path.parent()
                 .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()))
         };
 
         // 3. Build font book snapshot
