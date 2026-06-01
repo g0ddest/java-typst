@@ -5,6 +5,8 @@ package name.velikodniy.vitaliy.typst;
  */
 public abstract class TypstException extends RuntimeException {
 
+    private static final long serialVersionUID = 1L;
+
     /**
      * Create a new exception with a message.
      *

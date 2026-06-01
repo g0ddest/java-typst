@@ -7,6 +7,8 @@ import java.util.List;
  */
 public class TypstCompilationException extends TypstException {
 
+    private static final long serialVersionUID = 1L;
+
     /** The compilation diagnostics (errors and warnings). */
     private final List<TypstDiagnostic> diagnostics;
 

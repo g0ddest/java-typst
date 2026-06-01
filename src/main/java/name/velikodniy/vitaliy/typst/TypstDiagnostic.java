@@ -1,5 +1,7 @@
 package name.velikodniy.vitaliy.typst;
 
+import java.io.Serializable;
+
 /**
  * A single diagnostic (error or warning) produced by the Typst compiler.
  *
@@ -12,7 +14,7 @@ package name.velikodniy.vitaliy.typst;
  */
 public record TypstDiagnostic(
     Severity severity, String message, String file, int line, int column, String hint
-) {
+) implements Serializable {
     /**
      * Severity level of a Typst diagnostic.
      */

@@ -5,6 +5,8 @@ package name.velikodniy.vitaliy.typst;
  */
 public class TypstEngineException extends TypstException {
 
+    private static final long serialVersionUID = 1L;
+
     /**
      * Create a new engine exception with a message.
      *

@@ -5,6 +5,8 @@ package name.velikodniy.vitaliy.typst;
  */
 public class TypstNativeException extends TypstException {
 
+    private static final long serialVersionUID = 1L;
+
     /**
      * Create a new native exception with a message.
      *

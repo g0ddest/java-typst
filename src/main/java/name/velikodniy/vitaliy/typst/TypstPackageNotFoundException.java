@@ -5,6 +5,8 @@ package name.velikodniy.vitaliy.typst;
  */
 public class TypstPackageNotFoundException extends TypstEngineException {
 
+    private static final long serialVersionUID = 1L;
+
     public TypstPackageNotFoundException(String namespace, String name, String version) {
         super("Package not found: @%s/%s:%s".formatted(namespace, name, version));
     }
