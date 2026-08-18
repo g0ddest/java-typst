@@ -12,6 +12,7 @@ Renders Typst templates into PDF documents via an embedded native Typst compiler
 - **Template engine** — pure Typst templates with JSON data injection via virtual filesystem
 - **Auto-serialization** — Java Records, POJOs, Maps, Lists automatically serialized to JSON
 - **Custom fonts** — load from directories, byte arrays, InputStreams (classpath resources, DB, S3)
+- **Project root** — `typst --root`-style explicit root directory for imports, per engine or per render
 - **Template caching** — compiled templates reused across renders, mtime-based invalidation
 - **Thread-safe** — one engine instance, concurrent rendering from multiple threads
 - **Structured errors** — `TypstCompilationException` with file, line, column, message, hints
@@ -121,6 +122,7 @@ TypstEngine engine = TypstEngine.builder()
     .addFontDir(Path.of("/usr/share/fonts"))     // directory with .ttf/.otf files
     .addFont(fontBytes)                           // byte[]
     .addFont(inputStream)                         // InputStream (classpath, DB, S3)
+    .root(Path.of("/srv/typst-templates"))        // project root for imports (like typst --root)
     .enableTemplateCache(true)                    // default: true
     .build();
 ```
@@ -145,6 +147,7 @@ engine.template("my-template", typstSource)
 .data("key", value)           // key-value pair
 .data(record)                 // expand record fields as top-level keys
 .dataJson("{\"raw\":true}")   // raw JSON string
+.root(Path.of("/dir"))        // per-render root, overrides the engine default
 .renderPdf()                  // returns byte[]
 ```
 
@@ -229,6 +232,31 @@ Templates are standard Typst files. Data is injected via a virtual `data.json` f
 Templates work in [typst.app](https://typst.app) with a manually provided `data.json` — no vendor lock-in.
 
 Typst packages from [packages.typst.org](https://packages.typst.org) are supported and downloaded on demand.
+
+### Project Root and Imports
+
+Templates can import other files (`#import "helper.typ"`, `read(...)`, images). Which files are visible is controlled by the *root directory*, exactly like `typst --root`:
+
+```java
+// Engine-wide default
+var engine = TypstEngine.builder()
+    .root(Path.of("/srv/typst-templates"))
+    .build();
+
+// Per-render override
+engine.template("invoice", source)
+    .root(Path.of("/srv/tenant-42"))
+    .renderPdf();
+```
+
+Resolution rules:
+
+- **String templates** behave like the file `<root>/main.typ`: relative imports resolve against the root, and absolute Typst paths (`"/assets/logo.png"`) resolve from the root.
+- **File templates** keep their real position inside the root, so their relative imports resolve against the file's own directory. A file template outside an explicit root fails with a diagnostic (like the CLI).
+- **Sandbox**: paths escaping the root (`../secret`) are rejected. Containment is lexical — symlinks under the root can still point outside it, so don't let untrusted parties place symlinks there.
+- **Defaults** (no root configured): string templates resolve against the JVM working directory, file templates against the file's parent directory. In server applications the working directory is rarely meaningful — set an explicit root if string templates use imports.
+- **Packages** (`@preview/...`) are fetched by the package resolver and are unaffected by the root.
+- The injected `data.json` is virtual and lives next to the main file. It is only injected when data was bound — otherwise a real `data.json` in that directory is readable.
 
 ### Package Resolution
 
