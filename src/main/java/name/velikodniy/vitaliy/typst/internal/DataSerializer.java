@@ -280,6 +280,15 @@ public final class DataSerializer {
         }
 
         /**
+         * Whether no data has been added to this builder.
+         *
+         * @return true if the builder holds no entries
+         */
+        public boolean isEmpty() {
+            return data.isEmpty();
+        }
+
+        /**
          * Serialize merged data as a JSON object.
          *
          * @return the merged JSON object string

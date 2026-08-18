@@ -58,11 +58,14 @@ public final class TypstNative {
                 FunctionDescriptor.of(ValueLayout.JAVA_INT,
                         ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
-        // typst_compile(void*, const char*, const char*, const char*) -> void*
+        // typst_compile_v2(void*, const char*, const char*, const char*, const char*) -> void*
+        // Bound via orElseThrow so a stale native library (missing the options
+        // parameter) fails at load time instead of silently ignoring options.
         COMPILE = linker.downcallHandle(
-                symbols.find("typst_compile").orElseThrow(),
+                symbols.find("typst_compile_v2").orElseThrow(),
                 FunctionDescriptor.of(ValueLayout.ADDRESS,
-                        ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                        ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
         // typst_result_is_ok(const void*) -> int32_t
         RESULT_IS_OK = linker.downcallHandle(
@@ -298,10 +301,13 @@ public final class TypstNative {
      * @param templateKey cache key or file path
      * @param source      template source text, or null to read from file
      * @param dataJson    JSON data, or null for no data
+     * @param optionsJson JSON object with per-compile options (e.g. {@code {"root": ...}}),
+     *                    or null for defaults
      * @return pointer to the result (must be freed with resultFree)
      */
     public static MemorySegment compile(Arena arena, MemorySegment enginePtr,
-                                         String templateKey, String source, String dataJson) {
+                                         String templateKey, String source, String dataJson,
+                                         String optionsJson) {
         try {
             MemorySegment keyPtr = arena.allocateFrom(templateKey);
             MemorySegment sourcePtr = (source != null)
@@ -310,7 +316,11 @@ public final class TypstNative {
             MemorySegment dataPtr = (dataJson != null)
                     ? arena.allocateFrom(dataJson)
                     : MemorySegment.NULL;
-            return (MemorySegment) COMPILE.invokeExact(enginePtr, keyPtr, sourcePtr, dataPtr);
+            MemorySegment optionsPtr = (optionsJson != null)
+                    ? arena.allocateFrom(optionsJson)
+                    : MemorySegment.NULL;
+            return (MemorySegment) COMPILE.invokeExact(
+                    enginePtr, keyPtr, sourcePtr, dataPtr, optionsPtr);
         } catch (Throwable t) {
             throw wrap(t);
         }
