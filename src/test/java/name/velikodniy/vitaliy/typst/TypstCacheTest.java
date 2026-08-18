@@ -1,7 +1,11 @@
 package name.velikodniy.vitaliy.typst;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,6 +68,30 @@ class TypstCacheTest {
             byte[] pdf4 = engine.template("inv-all-b", "= Doc B v2").renderPdf();
             PdfAssert.assertValidPdf(pdf3);
             PdfAssert.assertValidPdf(pdf4);
+        }
+    }
+
+    @Test
+    void invalidateByDifferentPathSpellingHitsSameCacheEntry(@TempDir Path tempDir)
+            throws IOException {
+        Path sub = Files.createDirectory(tempDir.resolve("sub"));
+        Path main = tempDir.resolve("main.typ");
+        Path roundabout = sub.resolve("..").resolve("main.typ");
+        Files.writeString(main, "= Version 1");
+
+        try (var engine = TypstEngine.builder().enableTemplateCache(true).build()) {
+            byte[] pdf1 = engine.template(roundabout).renderPdf();
+            PdfAssert.assertValidPdf(pdf1);
+
+            Files.writeString(main, "= Version 2");
+            // Different spelling of the same file must invalidate the same key.
+            engine.invalidateTemplate(main);
+
+            byte[] pdf2 = engine.template(roundabout).renderPdf();
+            assertFalse(Arrays.equals(
+                            PdfAssert.stripVariables(pdf1),
+                            PdfAssert.stripVariables(pdf2)),
+                    "Render after invalidation must pick up the new file content");
         }
     }
 

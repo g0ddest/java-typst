@@ -65,15 +65,18 @@ public final class TypstEngine implements AutoCloseable {
     private final Arena nativeArena;
     private final PackageManager packageManager;
     private final AutoCloseable resolver;
+    private final String rootDirectory;
     private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
     private final Cleaner.Cleanable cleanable;
 
     private TypstEngine(MemorySegment enginePtr, Arena nativeArena,
-                        PackageManager packageManager, AutoCloseable resolver) {
+                        PackageManager packageManager, AutoCloseable resolver,
+                        String rootDirectory) {
         this.enginePtr = new AtomicReference<>(enginePtr);
         this.nativeArena = nativeArena;
         this.packageManager = packageManager;
         this.resolver = resolver;
+        this.rootDirectory = rootDirectory;
         // Register a cleanup hook for the case where the user forgets close().
         // The runnable must NOT capture `this`, only the state it needs.
         this.cleanable = CLEANER.register(this,
@@ -93,12 +96,27 @@ public final class TypstEngine implements AutoCloseable {
      * Create a template from a file path. The path is used both as the cache key
      * and as the source file location (the native engine reads the file).
      *
+     * <p>The path is normalized to an absolute path at this point, so a relative
+     * path resolves against the JVM working directory once, when the template is
+     * created. Imports inside the template resolve against the file's parent
+     * directory unless a root directory is configured — see
+     * {@link Builder#root(Path)}.
+     *
      * @param path path to the .typ template file
      * @return a new TypstTemplate for data binding and rendering
      */
     public TypstTemplate template(Path path) {
         Objects.requireNonNull(path, "path must not be null");
-        return new TypstTemplate(this, path.toString(), null);
+        return new TypstTemplate(this, templateKey(path), null);
+    }
+
+    /**
+     * Canonical string form of a file-template key: absolute and normalized, so
+     * that {@code template(Path)} and {@code invalidateTemplate(Path)} always
+     * agree on the cache key regardless of how the caller spelled the path.
+     */
+    private static String templateKey(Path path) {
+        return path.toAbsolutePath().normalize().toString();
     }
 
     /**
@@ -122,7 +140,7 @@ public final class TypstEngine implements AutoCloseable {
      */
     public void invalidateTemplate(Path path) {
         Objects.requireNonNull(path, "path must not be null");
-        invalidateTemplate(path.toString());
+        invalidateTemplate(templateKey(path));
     }
 
     /**
@@ -167,6 +185,14 @@ public final class TypstEngine implements AutoCloseable {
      */
     PackageManager packageManager() {
         return packageManager;
+    }
+
+    /**
+     * Package-private: the engine-wide default root directory (absolute,
+     * normalized), or null if none was configured.
+     */
+    String rootDirectory() {
+        return rootDirectory;
     }
 
     /**
@@ -247,9 +273,53 @@ public final class TypstEngine implements AutoCloseable {
         private boolean templateCacheEnabled = true;
         private String registry = null;
         private TypstPackageResolver packageResolver = null;
+        private String rootDirectory = null;
         private final List<FontSource> fontSources = new ArrayList<>();
 
         private Builder() {}
+
+        /**
+         * Set the engine-wide default root directory for resolving files
+         * referenced by templates (imports, {@code read(...)}, images, and the
+         * meaning of absolute Typst paths like {@code "/assets/logo.png"}),
+         * matching {@code typst --root}.
+         *
+         * <p>Defaults when no root is configured: string templates resolve
+         * files against the JVM process working directory; file templates
+         * against the template file's parent directory. In server applications
+         * the working directory is rarely meaningful, so setting an explicit
+         * root is recommended whenever string templates use imports.
+         *
+         * <p>Semantics with an explicit root:
+         * <ul>
+         *   <li>A string template behaves as if it were the file
+         *       {@code <root>/main.typ}.</li>
+         *   <li>A file template keeps its real position inside the root, so
+         *       its relative imports still resolve against the file's own
+         *       directory. A file template outside the root fails to render
+         *       with a diagnostic, like the typst CLI.</li>
+         *   <li>Paths that escape the root (e.g. {@code ../secret}) are
+         *       rejected. The containment is lexical: symlinks under the root
+         *       may still point outside it, so do not place untrusted symlinks
+         *       under the root.</li>
+         *   <li>Package imports ({@code @preview/...} and custom registries)
+         *       are resolved by the package resolver and are unaffected by the
+         *       root.</li>
+         * </ul>
+         *
+         * <p>The path is made absolute and normalized here, at configuration
+         * time. Its existence is not checked; a missing directory surfaces as
+         * compilation diagnostics at render time. Individual templates may
+         * override this default via {@link TypstTemplate#root(Path)}.
+         *
+         * @param root the root directory
+         * @return this builder
+         */
+        public Builder root(Path root) {
+            Objects.requireNonNull(root, "root must not be null");
+            this.rootDirectory = root.toAbsolutePath().normalize().toString();
+            return this;
+        }
 
         /**
          * Add a font from raw byte data.
@@ -354,7 +424,8 @@ public final class TypstEngine implements AutoCloseable {
                 throw new TypstEngineException("Failed to create native engine");
             }
 
-            TypstEngine engine = new TypstEngine(ptr, arena, packageManager, closeable);
+            TypstEngine engine = new TypstEngine(ptr, arena, packageManager, closeable,
+                    rootDirectory);
 
             // Load fonts
             try (var fontArena = Arena.ofConfined()) {

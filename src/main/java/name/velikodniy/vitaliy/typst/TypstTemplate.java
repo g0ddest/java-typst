@@ -5,6 +5,7 @@ import name.velikodniy.vitaliy.typst.internal.TypstNative;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -29,6 +30,7 @@ public final class TypstTemplate {
     private final String templateKey;
     private final String source;
     private final DataSerializer.Builder dataBuilder = new DataSerializer.Builder();
+    private String rootOverride;
 
     TypstTemplate(TypstEngine engine, String templateKey, String source) {
         this.engine = engine;
@@ -78,6 +80,24 @@ public final class TypstTemplate {
     }
 
     /**
+     * Set the root directory for this render, overriding the engine-wide
+     * default configured via {@link TypstEngine.Builder#root(Path)}. See that
+     * method for the full resolution contract (defaults, sandbox semantics,
+     * and file-template containment).
+     *
+     * <p>May be called at any point before {@link #renderPdf()}; the last call
+     * wins. The path is made absolute and normalized immediately.
+     *
+     * @param root the root directory for resolving files during this render
+     * @return this template for chaining
+     */
+    public TypstTemplate root(Path root) {
+        Objects.requireNonNull(root, "root must not be null");
+        this.rootOverride = root.toAbsolutePath().normalize().toString();
+        return this;
+    }
+
+    /**
      * Compile the template with the bound data and return the PDF bytes.
      *
      * @return PDF document as a byte array
@@ -85,7 +105,13 @@ public final class TypstTemplate {
      * @throws TypstNativeException      if a native call fails
      */
     public byte[] renderPdf() {
-        String dataJson = dataBuilder.toJson();
+        // No bound data means no injected data.json, so a real data.json under
+        // the root stays readable instead of being shadowed by "{}".
+        String dataJson = dataBuilder.isEmpty() ? null : dataBuilder.toJson();
+        String effectiveRoot = rootOverride != null ? rootOverride : engine.rootDirectory();
+        String optionsJson = effectiveRoot != null
+                ? "{\"root\":" + DataSerializer.toJson(effectiveRoot) + "}"
+                : null;
         MemorySegment resultPtr = null;
 
         // Hold the engine's read lock for the duration of the native call so
@@ -94,7 +120,8 @@ public final class TypstTemplate {
         try (var arena = Arena.ofConfined()) {
             MemorySegment enginePtr = engine.enginePtr();
             TypstNative.setCompileContext(engine.packageManager(), arena);
-            resultPtr = TypstNative.compile(arena, enginePtr, templateKey, source, dataJson);
+            resultPtr = TypstNative.compile(arena, enginePtr, templateKey, source, dataJson,
+                    optionsJson);
 
             // If the resolver upcall threw, surface the original exception
             // BEFORE looking at the compilation diagnostics — otherwise the
