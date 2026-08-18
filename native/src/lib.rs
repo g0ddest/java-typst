@@ -120,19 +120,36 @@ pub extern "C" fn typst_add_font_dir(
     }, || -1)
 }
 
-/// Compile a template.
+/// Compile a template (legacy entry point without options).
 ///
-/// - `template_key`: cache key or file path (required, must not be null)
-/// - `source`: template source text, or null to read from file at `template_key`
-/// - `data_json`: JSON data to inject as `data.json`, or null for no data
-///
-/// Returns a heap-allocated TypstResult. Must be freed with `typst_result_free`.
+/// Equivalent to `typst_compile_v2` with null `options_json`.
 #[no_mangle]
 pub extern "C" fn typst_compile(
     engine: *mut TypstJavaEngine,
     template_key: *const c_char,
     source: *const c_char,
     data_json: *const c_char,
+) -> *mut TypstResult {
+    typst_compile_v2(engine, template_key, source, data_json, std::ptr::null())
+}
+
+/// Compile a template.
+///
+/// - `template_key`: cache key or file path (required, must not be null)
+/// - `source`: template source text, or null to read from file at `template_key`
+/// - `data_json`: JSON data to inject as `data.json`, or null for no data
+/// - `options_json`: JSON object with per-compile options, or null for
+///   defaults. Recognized keys: `"root"` — explicit root directory for file
+///   resolution.
+///
+/// Returns a heap-allocated TypstResult. Must be freed with `typst_result_free`.
+#[no_mangle]
+pub extern "C" fn typst_compile_v2(
+    engine: *mut TypstJavaEngine,
+    template_key: *const c_char,
+    source: *const c_char,
+    data_json: *const c_char,
+    options_json: *const c_char,
 ) -> *mut TypstResult {
     ffi_guard(|| {
         if engine.is_null() || template_key.is_null() {
@@ -180,7 +197,57 @@ pub extern "C" fn typst_compile(
             }
         };
 
-        let result = engine.compile(key, source_str, data_str);
+        // Options must fail loudly: a silently dropped root would mis-resolve
+        // every import with no signal to the caller.
+        let options: Option<serde_json::Value> = if options_json.is_null() {
+            None
+        } else {
+            let text = match unsafe { CStr::from_ptr(options_json) }.to_str() {
+                Ok(s) => s,
+                Err(_) => {
+                    let result = TypstResult::failure(
+                        r#"[{"severity":"ERROR","message":"invalid UTF-8 in options_json","file":"","line":0,"column":0,"hint":null}]"#.to_string(),
+                        "[]".to_string(),
+                    );
+                    return Box::into_raw(Box::new(result));
+                }
+            };
+            match serde_json::from_str(text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    let error_json = serde_json::json!([{
+                        "severity": "ERROR",
+                        "message": format!("invalid options_json: {}", e),
+                        "file": "",
+                        "line": 0,
+                        "column": 0,
+                        "hint": null
+                    }]);
+                    let result =
+                        TypstResult::failure(error_json.to_string(), "[]".to_string());
+                    return Box::into_raw(Box::new(result));
+                }
+            }
+        };
+        let root = match options.as_ref().and_then(|o| o.get("root")) {
+            None => None,
+            Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.as_str()),
+            Some(other) => {
+                let error_json = serde_json::json!([{
+                    "severity": "ERROR",
+                    "message": format!("options_json: \"root\" must be a string, got: {}", other),
+                    "file": "",
+                    "line": 0,
+                    "column": 0,
+                    "hint": null
+                }]);
+                let result = TypstResult::failure(error_json.to_string(), "[]".to_string());
+                return Box::into_raw(Box::new(result));
+            }
+        };
+
+        let result = engine.compile(key, source_str, data_str, root);
         Box::into_raw(Box::new(result))
     }, || {
         // A panic deep inside typst/typst-pdf must surface as an error result,
@@ -326,6 +393,53 @@ mod tests {
         // The happy path returns the closure's value untouched.
         let ok = ffi_guard(|| -> c_int { 42 }, || -1);
         assert_eq!(ok, 42);
+    }
+
+    #[test]
+    fn test_compile_v2_with_root_option() {
+        let dir = std::env::temp_dir().join("typst_java_test_ffi_v2_root");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("helper.typ"), "#let greet(name) = [Hello, #name!]\n").unwrap();
+
+        let engine = typst_engine_new(ptr::null(), noop_resolve);
+        let key = CString::new("test").unwrap();
+        let source = CString::new("#import \"helper.typ\": greet\n#greet(\"V2\")\n").unwrap();
+        let options =
+            CString::new(format!(r#"{{"root": {}}}"#, serde_json::json!(dir.to_str().unwrap())))
+                .unwrap();
+
+        let result = typst_compile_v2(
+            engine, key.as_ptr(), source.as_ptr(), ptr::null(), options.as_ptr(),
+        );
+        assert_eq!(typst_result_is_ok(result), 1, "root option should resolve the import");
+        typst_result_free(result);
+
+        // Null options behave like the legacy entry point.
+        let plain = CString::new("Hello").unwrap();
+        let result = typst_compile_v2(
+            engine, key.as_ptr(), plain.as_ptr(), ptr::null(), ptr::null(),
+        );
+        assert_eq!(typst_result_is_ok(result), 1);
+        typst_result_free(result);
+
+        // Malformed options JSON must produce an error result, not a fallback.
+        let bad = CString::new("{not json").unwrap();
+        let result = typst_compile_v2(
+            engine, key.as_ptr(), plain.as_ptr(), ptr::null(), bad.as_ptr(),
+        );
+        assert_eq!(typst_result_is_ok(result), 0, "malformed options must fail loudly");
+        typst_result_free(result);
+
+        // A root of the wrong JSON type must also fail, not silently fall back.
+        let wrong_type = CString::new(r#"{"root": 5}"#).unwrap();
+        let result = typst_compile_v2(
+            engine, key.as_ptr(), plain.as_ptr(), ptr::null(), wrong_type.as_ptr(),
+        );
+        assert_eq!(typst_result_is_ok(result), 0, "non-string root must fail loudly");
+        typst_result_free(result);
+
+        typst_engine_free(engine);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
