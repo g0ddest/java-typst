@@ -1,7 +1,7 @@
 // Error and warning diagnostics
 
 use typst::diag::{Severity, SourceDiagnostic};
-use typst::World;
+use typst::{World, WorldExt};
 
 /// Convert a slice of SourceDiagnostic to a JSON string array.
 /// Each diagnostic becomes an object with severity, message, file, line, column, hints.
@@ -24,16 +24,12 @@ fn diagnostic_to_json(diag: &SourceDiagnostic, world: &dyn World) -> serde_json:
 
     // Try to resolve file/line/column from span
     let (file, line, column) = if let Some(id) = diag.span.id() {
-        let file_path = id.vpath().as_rooted_path().display().to_string();
-        if let Ok(source) = world.source(id) {
-            if let Some(range) = source.range(diag.span) {
-                let lines = source.lines();
-                let line = lines.byte_to_line(range.start).unwrap_or(0);
-                let col = lines.byte_to_column(range.start).unwrap_or(0);
-                (file_path, line + 1, col + 1) // 1-based
-            } else {
-                (file_path, 0, 0)
-            }
+        let file_path = id.vpath().get_with_slash().to_string();
+        if let (Ok(source), Some(range)) = (world.source(id), world.range(diag.span)) {
+            let lines = source.lines();
+            let line = lines.byte_to_line(range.start).unwrap_or(0);
+            let col = lines.byte_to_column(range.start).unwrap_or(0);
+            (file_path, line + 1, col + 1) // 1-based
         } else {
             (file_path, 0, 0)
         }
@@ -48,7 +44,7 @@ fn diagnostic_to_json(diag: &SourceDiagnostic, world: &dyn World) -> serde_json:
         Some(
             diag.hints
                 .iter()
-                .map(|h| h.to_string())
+                .map(|h| h.v.to_string())
                 .collect::<Vec<_>>()
                 .join("; "),
         )

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime};
+use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
@@ -55,7 +55,9 @@ impl TypstJavaWorld {
         data_json: Option<String>,
         download_fn: ResolveFn,
     ) -> Self {
-        let main_id = FileId::new(None, VirtualPath::new("main.typ"));
+        let main_vpath = VirtualPath::new("main.typ")
+            .expect("static path 'main.typ' is always valid");
+        let main_id = FileId::new(RootedPath::new(VirtualRoot::Project, main_vpath));
         let main_source = Source::new(main_id, main_source_text);
 
         let vfs = Vfs::new(root);
@@ -80,25 +82,28 @@ impl TypstJavaWorld {
 
     /// Resolve the root path for a file id, handling packages.
     fn resolve_path(&self, id: FileId) -> FileResult<PathBuf> {
-        if let Some(spec) = id.package() {
-            // It's a package file — resolve via package manager
-            let mut paths = self.package_paths.write();
-            let package_root = if let Some(root) = paths.get(spec) {
-                root.clone()
-            } else {
-                let root = packages::resolve_package(spec, self.download_fn)
-                    .map_err(|e| FileError::Package(e))?;
-                paths.insert(spec.clone(), root.clone());
-                root
-            };
-            id.vpath()
-                .resolve(&package_root)
-                .ok_or(FileError::AccessDenied)
-        } else {
-            // Local file — resolve relative to VFS root
-            id.vpath()
-                .resolve(self.vfs.root())
-                .ok_or(FileError::AccessDenied)
+        match id.root() {
+            VirtualRoot::Package(spec) => {
+                // It's a package file — resolve via package manager
+                let mut paths = self.package_paths.write();
+                let package_root = if let Some(root) = paths.get(spec) {
+                    root.clone()
+                } else {
+                    let root = packages::resolve_package(spec, self.download_fn)
+                        .map_err(FileError::Package)?;
+                    paths.insert(spec.clone(), root.clone());
+                    root
+                };
+                id.vpath()
+                    .realize(&package_root)
+                    .map_err(|_| FileError::AccessDenied)
+            }
+            VirtualRoot::Project => {
+                // Local file — resolve relative to VFS root
+                id.vpath()
+                    .realize(self.vfs.root())
+                    .map_err(|_| FileError::AccessDenied)
+            }
         }
     }
 }
@@ -131,17 +136,16 @@ impl World for TypstJavaWorld {
         }
 
         // Read the file from VFS or disk
-        let rel_path = id.vpath().as_rootless_path();
-        let text = if id.package().is_some() {
+        let rel_str = id.vpath().get_without_slash();
+        let text = if matches!(id.root(), VirtualRoot::Package(_)) {
             // Package file — read from resolved path
             let path = self.resolve_path(id)?;
             std::fs::read_to_string(&path)
                 .map_err(|_| FileError::NotFound(path))?
         } else {
             // Local file — try VFS first
-            let rel_str = rel_path.to_string_lossy().to_string();
-            let bytes = self.vfs.read(&rel_str).map_err(|_| {
-                FileError::NotFound(self.vfs.root().join(rel_path).to_path_buf())
+            let bytes = self.vfs.read(rel_str).map_err(|_| {
+                FileError::NotFound(self.vfs.root().join(rel_str))
             })?;
             String::from_utf8(bytes.as_ref().to_vec())
                 .map_err(|_| FileError::InvalidUtf8)?
@@ -153,9 +157,9 @@ impl World for TypstJavaWorld {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        let rel_path = id.vpath().as_rootless_path();
+        let rel_str = id.vpath().get_without_slash();
 
-        if id.package().is_some() {
+        if matches!(id.root(), VirtualRoot::Package(_)) {
             // Package file
             let path = self.resolve_path(id)?;
             let data = std::fs::read(&path)
@@ -163,9 +167,8 @@ impl World for TypstJavaWorld {
             Ok(Bytes::new(data))
         } else {
             // Local file — try VFS first
-            let rel_str = rel_path.to_string_lossy().to_string();
-            self.vfs.read(&rel_str).map_err(|_| {
-                FileError::NotFound(self.vfs.root().join(rel_path).to_path_buf())
+            self.vfs.read(rel_str).map_err(|_| {
+                FileError::NotFound(self.vfs.root().join(rel_str))
             })
         }
     }
@@ -174,12 +177,17 @@ impl World for TypstJavaWorld {
         self.font_manager.font(index)
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
         let now = chrono::Local::now();
 
         let naive = if let Some(offset) = offset {
+            let [weeks, days, hours, minutes, seconds] = offset.decompose();
             let utc = chrono::Utc::now().naive_utc();
-            utc + chrono::Duration::hours(offset)
+            utc + chrono::Duration::weeks(weeks)
+                + chrono::Duration::days(days)
+                + chrono::Duration::hours(hours)
+                + chrono::Duration::minutes(minutes)
+                + chrono::Duration::seconds(seconds)
         } else {
             now.naive_local()
         };

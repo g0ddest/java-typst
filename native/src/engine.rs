@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use typst::layout::PagedDocument;
+use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
 use crate::cache::{CachedTemplate, TemplateCache};
