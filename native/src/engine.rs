@@ -234,8 +234,12 @@ Hello, #data.name!
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
-        use crate::packages::tests::{test_resolve, cleanup_test_package_cache, TEST_SERVER_PORT};
+        use crate::packages::tests::{
+            test_resolve, cleanup_test_package_cache, REGISTRY_TEST_LOCK, TEST_SERVER_PORT,
+        };
         use std::sync::atomic::Ordering;
+
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut tar_builder = tar::Builder::new(Vec::new());
 

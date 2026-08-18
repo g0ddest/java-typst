@@ -68,6 +68,12 @@ pub mod tests {
 
     pub static TEST_SERVER_PORT: AtomicU16 = AtomicU16::new(0);
 
+    /// Serializes all tests that use the mini registry. They share
+    /// TEST_SERVER_PORT and the on-disk package cache, and each test's server
+    /// answers exactly one request — run concurrently, one test's cleanup or
+    /// port store breaks another and its server blocks in accept() forever.
+    pub static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Thread-local storage for the resolved path string (keeps it alive for Rust to read).
     thread_local! {
         static RESOLVED_PATH: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
@@ -188,6 +194,7 @@ pub mod tests {
 
     #[test]
     fn test_resolve_from_custom_registry() {
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         cleanup_test_package_cache();
 
         let tar_gz = create_test_package_tar_gz();
@@ -213,6 +220,7 @@ pub mod tests {
 
     #[test]
     fn test_resolve_404_returns_not_found() {
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         TEST_SERVER_PORT.store(port, Ordering::Relaxed);
