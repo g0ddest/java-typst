@@ -45,18 +45,28 @@ impl TypstJavaWorld {
     /// - `font_manager`: shared font manager
     /// - `book`: snapshot of the font book
     /// - `root`: root directory for file resolution
+    /// - `main_vpath`: virtual path of the main file within the root
     /// - `main_source_text`: the Typst source to compile
-    /// - `data_json`: optional JSON data to inject as `data.json`
+    /// - `data_json`: optional JSON data injected as `data.json` next to the
+    ///   main file
     pub fn new(
         font_manager: Arc<FontManager>,
         book: FontBook,
         root: PathBuf,
+        main_vpath: VirtualPath,
         main_source_text: String,
         data_json: Option<String>,
         download_fn: ResolveFn,
     ) -> Self {
-        let main_vpath = VirtualPath::new("main.typ")
-            .expect("static path 'main.typ' is always valid");
+        // data.json lives in the main file's directory, so `json("data.json")`
+        // in the template resolves to it regardless of where the main file
+        // sits within the root.
+        let data_vpath = main_vpath
+            .parent()
+            .unwrap_or_else(|| VirtualPath::new("/").expect("root path is valid"))
+            .join("data.json")
+            .expect("static segment 'data.json' is always valid");
+
         let main_id = FileId::new(RootedPath::new(VirtualRoot::Project, main_vpath));
         let main_source = Source::new(main_id, main_source_text);
 
@@ -64,7 +74,7 @@ impl TypstJavaWorld {
 
         // Inject data.json if provided
         if let Some(json) = data_json {
-            vfs.inject("data.json", json.into_bytes());
+            vfs.inject(data_vpath.get_without_slash(), json.into_bytes());
         }
 
         Self {

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use typst::syntax::VirtualPath;
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
@@ -51,11 +52,15 @@ impl TypstJavaEngine {
     /// - `template_key`: cache key / file path
     /// - `source`: if non-None, the template source text (cached under template_key)
     /// - `data_json`: if non-None, injected as data.json in VFS
+    /// - `root`: if non-None, the explicit root directory for file resolution;
+    ///   otherwise the legacy default is used (CWD for string templates, the
+    ///   file's parent directory for file templates)
     pub fn compile(
         &self,
         template_key: &str,
         source: Option<&str>,
         data_json: Option<&str>,
+        root: Option<&str>,
     ) -> TypstResult {
         // 1. Resolve the template source text
         let source_text = match self.resolve_source(template_key, source) {
@@ -73,16 +78,20 @@ impl TypstJavaEngine {
             }
         };
 
-        // 2. Determine root directory
-        let root = if source.is_some() {
-            // String template — use current dir or temp
-            std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())
-        } else {
-            // File template — use the file's parent directory
-            let path = std::path::Path::new(template_key);
-            path.parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()))
+        // 2. Determine the root directory and the main file's virtual path
+        let (root, main_vpath) = match resolve_root(template_key, source.is_some(), root) {
+            Ok(pair) => pair,
+            Err(err) => {
+                let error_json = serde_json::json!([{
+                    "severity": "ERROR",
+                    "message": err,
+                    "file": "",
+                    "line": 0,
+                    "column": 0,
+                    "hint": null
+                }]);
+                return TypstResult::failure(error_json.to_string(), "[]".to_string());
+            }
         };
 
         // 3. Build font book snapshot
@@ -93,6 +102,7 @@ impl TypstJavaEngine {
             self.font_manager.clone(),
             book,
             root,
+            main_vpath,
             source_text,
             data_json.map(|s| s.to_string()),
             self.download_fn,
@@ -178,6 +188,67 @@ impl TypstJavaEngine {
     }
 }
 
+/// Determine the real root directory and the main file's virtual path.
+///
+/// String templates always live directly at the root as `main.typ`. File
+/// templates keep their real position within the root (like `typst --root`);
+/// with no explicit root, the root defaults to the file's parent directory,
+/// which yields a virtual path of just the file name. Errors if an explicit
+/// root does not contain the template file (matching the typst CLI).
+fn resolve_root(
+    template_key: &str,
+    is_string_template: bool,
+    root: Option<&str>,
+) -> Result<(std::path::PathBuf, VirtualPath), String> {
+    use std::path::{Path, PathBuf};
+
+    if let Some(r) = root {
+        if r.trim().is_empty() {
+            return Err("root directory must not be empty".to_string());
+        }
+    }
+
+    if is_string_template {
+        let root_dir = match root {
+            Some(r) => PathBuf::from(r),
+            None => std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+        };
+        let vpath = VirtualPath::new("main.typ")
+            .expect("static path 'main.typ' is always valid");
+        return Ok((root_dir, vpath));
+    }
+
+    let file = Path::new(template_key);
+    let root_dir = match root {
+        Some(r) => PathBuf::from(r),
+        None => file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())),
+    };
+
+    // Canonicalize both sides so the lexical containment check is immune to
+    // relative paths and symlinked directories (e.g. /var vs /private/var on
+    // macOS). Reads still go through `root_dir` as given.
+    let canon_root = std::fs::canonicalize(&root_dir).map_err(|e| {
+        format!("root directory '{}' is not accessible: {}", root_dir.display(), e)
+    })?;
+    let canon_file = std::fs::canonicalize(file).map_err(|e| {
+        format!("template file '{}' is not accessible: {}", file.display(), e)
+    })?;
+
+    let vpath = VirtualPath::virtualize(&canon_root, &canon_file).map_err(|_| {
+        format!(
+            "template file '{}' must be contained in the root directory '{}'",
+            file.display(),
+            root_dir.display()
+        )
+    })?;
+
+    Ok((canon_root, vpath))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,7 +267,7 @@ mod tests {
     #[test]
     fn test_simple_compile() {
         let engine = TypstJavaEngine::new(true, noop_resolve);
-        let result = engine.compile("test", Some("Hello, World!"), None);
+        let result = engine.compile("test", Some("Hello, World!"), None, None);
         assert!(result.is_ok(), "Simple compile should succeed");
         assert!(result.pdf_data().is_some(), "Should produce PDF bytes");
         let (data, len) = result.pdf_data().unwrap();
@@ -212,16 +283,151 @@ mod tests {
 Hello, #data.name!
 "#;
         let data_json = r#"{"name": "World"}"#;
-        let result = engine.compile("test", Some(source), Some(data_json));
+        let result = engine.compile("test", Some(source), Some(data_json), None);
         assert!(result.is_ok(), "Compile with data should succeed");
         assert!(result.pdf_data().is_some());
+    }
+
+    #[test]
+    fn test_string_template_with_explicit_root_resolves_import() {
+        let dir = std::env::temp_dir().join("typst_java_test_string_root");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("helper.typ"), "#let greet(name) = [Hello, #name!]\n").unwrap();
+
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        let source = "#import \"helper.typ\": greet\n#greet(\"Root\")\n";
+        let result = engine.compile("test", Some(source), None, Some(dir.to_str().unwrap()));
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_ok(), "Compile with explicit root should resolve the import");
+        assert!(result.pdf_data().is_some());
+    }
+
+    #[test]
+    fn test_file_template_sibling_import_with_ancestor_root() {
+        let dir = std::env::temp_dir().join("typst_java_test_file_ancestor_root");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("helper.typ"), "#let greet(name) = [Hi, #name!]\n").unwrap();
+        let main_path = sub.join("main.typ");
+        std::fs::write(&main_path, "#import \"helper.typ\": greet\n#greet(\"Sub\")\n").unwrap();
+
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        // Like `typst compile --root dir sub/main.typ`: the relative import must
+        // resolve against the file's own directory, not against the root.
+        let result = engine.compile(
+            main_path.to_str().unwrap(),
+            None,
+            None,
+            Some(dir.to_str().unwrap()),
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            result.is_ok(),
+            "Sibling import must resolve relative to the template file: {:?}",
+            unsafe { std::ffi::CStr::from_ptr(result.errors_ptr()) }
+        );
+    }
+
+    #[test]
+    fn test_file_template_outside_explicit_root_errors() {
+        let dir_a = std::env::temp_dir().join("typst_java_test_outside_root_a");
+        let dir_b = std::env::temp_dir().join("typst_java_test_outside_root_b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let main_path = dir_a.join("main.typ");
+        std::fs::write(&main_path, "Hello\n").unwrap();
+
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        let result = engine.compile(
+            main_path.to_str().unwrap(),
+            None,
+            None,
+            Some(dir_b.to_str().unwrap()),
+        );
+
+        let errors = unsafe { std::ffi::CStr::from_ptr(result.errors_ptr()) }
+            .to_str().unwrap().to_string();
+        std::fs::remove_dir_all(&dir_a).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
+        assert!(!result.is_ok(), "File outside the explicit root must be rejected");
+        assert!(errors.contains("must be contained in the root directory"),
+                "Error should explain the containment failure, got: {errors}");
+    }
+
+    #[test]
+    fn test_empty_root_returns_error() {
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        let result = engine.compile("test", Some("Hello"), None, Some(""));
+        let errors = unsafe { std::ffi::CStr::from_ptr(result.errors_ptr()) }
+            .to_str().unwrap();
+        assert!(!result.is_ok(), "Empty root must be rejected");
+        assert!(errors.contains("root directory must not be empty"), "got: {errors}");
+    }
+
+    #[test]
+    fn test_traversal_escape_is_denied_and_content_not_leaked() {
+        let parent = std::env::temp_dir().join("typst_java_test_traversal");
+        let root = parent.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let secret = "SUPER-SECRET-CONTENT-42";
+        std::fs::write(parent.join("secret.typ"), format!("#let leak = [{secret}]\n")).unwrap();
+
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        let source = "#import \"../secret.typ\": leak\n#leak\n";
+        let result = engine.compile("test", Some(source), None, Some(root.to_str().unwrap()));
+
+        let errors = unsafe { std::ffi::CStr::from_ptr(result.errors_ptr()) }
+            .to_str().unwrap().to_string();
+        std::fs::remove_dir_all(&parent).ok();
+        assert!(!result.is_ok(), "Escaping the root via ../ must fail");
+        assert!(!errors.contains(secret), "Error output must not leak file content");
+    }
+
+    #[test]
+    fn test_data_json_reaches_nested_file_template() {
+        let dir = std::env::temp_dir().join("typst_java_test_nested_data");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let main_path = sub.join("main.typ");
+        std::fs::write(&main_path, "#let d = json(\"data.json\")\nHello, #d.name!\n").unwrap();
+
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        let result = engine.compile(
+            main_path.to_str().unwrap(),
+            None,
+            Some(r#"{"name": "Nested"}"#),
+            Some(dir.to_str().unwrap()),
+        );
+
+        let errors = unsafe { std::ffi::CStr::from_ptr(result.errors_ptr()) }
+            .to_str().unwrap().to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_ok(),
+                "Bound data must reach a template nested under the root: {errors}");
+    }
+
+    #[test]
+    fn test_file_template_without_root_keeps_sibling_imports() {
+        let dir = std::env::temp_dir().join("typst_java_test_legacy_file");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("helper.typ"), "#let greet(name) = [Hey, #name!]\n").unwrap();
+        let main_path = dir.join("main.typ");
+        std::fs::write(&main_path, "#import \"helper.typ\": greet\n#greet(\"Legacy\")\n").unwrap();
+
+        let engine = TypstJavaEngine::new(true, noop_resolve);
+        let result = engine.compile(main_path.to_str().unwrap(), None, None, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_ok(), "Legacy parent-dir root behavior must be preserved");
     }
 
     #[test]
     fn test_invalid_template_returns_errors() {
         let engine = TypstJavaEngine::new(true, noop_resolve);
         let source = "#unknown_function()";
-        let result = engine.compile("test", Some(source), None);
+        let result = engine.compile("test", Some(source), None, None);
         assert!(!result.is_ok(), "Invalid template should fail");
         let errors = unsafe { std::ffi::CStr::from_ptr(result.errors_ptr()) }
             .to_str()
@@ -289,7 +495,7 @@ Hello, #data.name!
         let source = r#"#import "@test-local/test-hello:0.1.0": greet
 #greet("Typst")
 "#;
-        let result = engine.compile("test", Some(source), None);
+        let result = engine.compile("test", Some(source), None, None);
         assert!(result.is_ok(), "Compile with custom registry package should succeed");
         assert!(result.pdf_data().is_some(), "Should produce PDF");
 
