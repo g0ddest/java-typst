@@ -19,7 +19,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class PackageManager {
 
-    private static final Path CACHE_DIR = Path.of(
+    /** Default on-disk package cache: {@code ${java.io.tmpdir}/typst/packages}. */
+    public static final Path DEFAULT_CACHE_DIR = Path.of(
             System.getProperty("java.io.tmpdir"),
             "typst",
             "packages"
@@ -35,14 +36,24 @@ public final class PackageManager {
     private final ConcurrentHashMap<String, Object> packageLocks = new ConcurrentHashMap<>();
 
     private final TypstPackageResolver resolver;
+    private final Path cacheDir;
     private final long maxUnpackBytes;
 
     public PackageManager(TypstPackageResolver resolver) {
-        this(resolver, DEFAULT_MAX_UNPACK_BYTES);
+        this(resolver, DEFAULT_CACHE_DIR);
+    }
+
+    public PackageManager(TypstPackageResolver resolver, Path cacheDir) {
+        this(resolver, cacheDir, DEFAULT_MAX_UNPACK_BYTES);
     }
 
     PackageManager(TypstPackageResolver resolver, long maxUnpackBytes) {
+        this(resolver, DEFAULT_CACHE_DIR, maxUnpackBytes);
+    }
+
+    PackageManager(TypstPackageResolver resolver, Path cacheDir, long maxUnpackBytes) {
         this.resolver = resolver;
+        this.cacheDir = cacheDir;
         this.maxUnpackBytes = maxUnpackBytes;
     }
 
@@ -53,7 +64,7 @@ public final class PackageManager {
      * @throws IOException if the resolver fails to fetch the package
      */
     public String resolveToPath(String namespace, String name, String version) throws IOException {
-        Path packageDir = CACHE_DIR.resolve(Path.of(namespace, name, version));
+        Path packageDir = cacheDir.resolve(Path.of(namespace, name, version));
 
         if (Files.isDirectory(packageDir)) {
             return packageDir.toString();

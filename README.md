@@ -123,6 +123,7 @@ TypstEngine engine = TypstEngine.builder()
     .addFont(fontBytes)                           // byte[]
     .addFont(inputStream)                         // InputStream (classpath, DB, S3)
     .root(Path.of("/srv/typst-templates"))        // project root for imports (like typst --root)
+    .packageCacheDir(Path.of("/var/cache/typst")) // default: ${java.io.tmpdir}/typst/packages
     .enableTemplateCache(true)                    // default: true
     .build();
 ```
@@ -293,6 +294,19 @@ var engine = TypstEngine.builder()
 ```
 
 The resolver is a `@FunctionalInterface` that receives package coordinates (`namespace`, `name`, `version`) and returns the archive as `tar.gz` bytes. The engine handles unpacking and disk caching automatically. Throw `TypstPackageNotFoundException` if the package does not exist; any other `IOException` is propagated to the caller.
+
+### Disk Usage and Restricted Environments
+
+The library writes to disk in two places:
+
+| What | Default location | Override |
+|------|------------------|----------|
+| Extracted native library | `${user.home}/.cache/typst-java` (`%LOCALAPPDATA%\typst-java` on Windows) | `-Dtypst.java.cacheDir=...` or `TYPST_JAVA_CACHE_DIR` |
+| Unpacked packages | `${java.io.tmpdir}/typst/packages` | `TypstEngine.builder().packageCacheDir(...)` |
+
+If the home directory does not exist, the JVM cannot determine it (`user.home` is `?`, as for a container UID without a passwd entry), or `~/.cache/typst-java` can be neither written nor created, the native library is extracted to `${java.io.tmpdir}/typst-java` instead. So it works out of the box in containers where the process runs as an unprivileged user and only the temp directory is writable.
+
+The temp directory is taken from the `java.io.tmpdir` system property, not hardcoded. Note that on Linux the JVM defaults it to `/tmp` and ignores the `TMPDIR` environment variable, so pass `-Djava.io.tmpdir=...` (e.g. via `JAVA_TOOL_OPTIONS`) to move it. On a multi-user host with a shared `/tmp`, prefer setting `typst.java.cacheDir` to a directory only your user can write.
 
 ## Architecture
 

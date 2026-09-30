@@ -274,6 +274,7 @@ public final class TypstEngine implements AutoCloseable {
         private String registry = null;
         private TypstPackageResolver packageResolver = null;
         private String rootDirectory = null;
+        private Path packageCacheDir = PackageManager.DEFAULT_CACHE_DIR;
         private final List<FontSource> fontSources = new ArrayList<>();
 
         private Builder() {}
@@ -388,6 +389,22 @@ public final class TypstEngine implements AutoCloseable {
         }
 
         /**
+         * Set the directory where downloaded packages are unpacked and cached.
+         * Default is {@code ${java.io.tmpdir}/typst/packages}.
+         *
+         * <p>The directory is created on first use. Engines sharing a directory
+         * share the cached packages.
+         *
+         * @param dir the package cache directory
+         * @return this builder
+         */
+        public Builder packageCacheDir(Path dir) {
+            Objects.requireNonNull(dir, "dir must not be null");
+            this.packageCacheDir = dir.toAbsolutePath().normalize();
+            return this;
+        }
+
+        /**
          * Enable or disable the template cache in the native engine.
          * Default is {@code true}.
          *
@@ -417,7 +434,7 @@ public final class TypstEngine implements AutoCloseable {
                             registry != null ? registry : DEFAULT_REGISTRY);
             // Track resolver for cleanup if it's AutoCloseable (e.g. HttpPackageResolver)
             AutoCloseable closeable = resolver instanceof AutoCloseable ac ? ac : () -> {};
-            var packageManager = new PackageManager(resolver);
+            var packageManager = new PackageManager(resolver, packageCacheDir);
             MemorySegment resolverStub = TypstNative.createResolverStub(arena);
             MemorySegment ptr = TypstNative.engineNew(arena, config, resolverStub);
             if (ptr == null || ptr.equals(MemorySegment.NULL)) {

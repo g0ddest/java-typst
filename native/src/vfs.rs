@@ -107,7 +107,12 @@ mod tests {
 
     #[test]
     fn test_clear_virtual() {
-        let vfs = Vfs::new(PathBuf::from("/tmp"));
+        // An empty root of our own, so stray real files (e.g. /tmp/a.txt) cannot shadow the check.
+        let dir = std::env::temp_dir().join("typst_java_vfs_clear_test");
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+
+        let vfs = Vfs::new(dir.clone());
         vfs.inject("a.txt", b"aaa".to_vec());
         vfs.inject("b.txt", b"bbb".to_vec());
 
@@ -115,9 +120,12 @@ mod tests {
         assert!(vfs.read("a.txt").is_ok());
         assert!(vfs.read("b.txt").is_ok());
 
-        // After clear, both should fail (no real files at /tmp/a.txt etc.)
+        // After clear, both should fail (the root has no real a.txt / b.txt)
         vfs.clear_virtual();
         assert!(vfs.read("a.txt").is_err());
         assert!(vfs.read("b.txt").is_err());
+
+        // Cleanup
+        fs::remove_dir_all(&dir).ok();
     }
 }

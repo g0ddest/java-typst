@@ -6,11 +6,17 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PackageManagerTest {
 
@@ -64,5 +70,17 @@ class PackageManagerTest {
 
         assertThrows(TypstEngineException.class,
                 () -> pm.resolveToPath("sizetest", "pkg", "1.0.0"));
+    }
+
+    @Test
+    void unpacksIntoConfiguredCacheDir(@TempDir Path cacheDir) throws IOException {
+        byte[] archive = tarGz(Entry.file("lib.typ", "#let x = 1".getBytes(StandardCharsets.UTF_8)));
+        var pm = new PackageManager(fixedResolver(archive), cacheDir);
+
+        String path = pm.resolveToPath("custom", "pkg", "1.0.0");
+
+        Path expected = cacheDir.resolve(Path.of("custom", "pkg", "1.0.0"));
+        assertEquals(expected.toString(), path);
+        assertTrue(Files.isRegularFile(expected.resolve("lib.typ")));
     }
 }

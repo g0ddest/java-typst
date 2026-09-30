@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class NativeLibLoaderTest {
 
@@ -81,14 +83,68 @@ class NativeLibLoaderTest {
 
     @Test
     void cacheRootPrefersLocalAppDataOnWindows() {
-        Path p = NativeLibLoader.cacheRoot("Windows 11", "C:\\Users\\u\\AppData\\Local", "C:\\Users\\u");
+        Path p = NativeLibLoader.cacheRoot(null, "Windows 11", "C:\\Users\\u\\AppData\\Local",
+                "C:\\Users\\u", "C:\\Temp");
         assertEquals(Path.of("C:\\Users\\u\\AppData\\Local", "typst-java"), p);
     }
 
     @Test
-    void cacheRootFallsBackToCacheDirOnPosix() {
-        Path p = NativeLibLoader.cacheRoot("Linux", null, "/home/u");
-        assertEquals(Path.of("/home/u", ".cache", "typst-java"), p);
+    void cacheRootUsesHomeCacheDirOnPosix(@TempDir Path home, @TempDir Path tmp) {
+        Path p = NativeLibLoader.cacheRoot(null, "Linux", null, home.toString(), tmp.toString());
+        assertEquals(home.resolve(".cache").resolve("typst-java"), p);
+    }
+
+    @Test
+    void cacheRootFallsBackToTmpDirWhenHomeIsMissing(@TempDir Path tmp) {
+        String missingHome = tmp.resolve("no-such-home").toString();
+        Path p = NativeLibLoader.cacheRoot(null, "Linux", null, missingHome, tmp.toString());
+        assertEquals(tmp.resolve("typst-java"), p);
+    }
+
+    @Test
+    void cacheRootFallsBackToTmpDirWhenHomeIsUnknown(@TempDir Path tmp) {
+        // The JVM reports "?" when the current UID has no passwd entry.
+        assertEquals(tmp.resolve("typst-java"),
+                NativeLibLoader.cacheRoot(null, "Linux", null, "?", tmp.toString()));
+        assertEquals(tmp.resolve("typst-java"),
+                NativeLibLoader.cacheRoot(null, "Linux", null, null, tmp.toString()));
+        assertEquals(tmp.resolve("typst-java"),
+                NativeLibLoader.cacheRoot(null, "Linux", null, "", tmp.toString()));
+    }
+
+    @Test
+    void cacheRootFallsBackToTmpDirWhenHomeIsNotWritable(@TempDir Path tmp) throws Exception {
+        Path home = Files.createDirectory(tmp.resolve("ro-home"));
+        assumeTrue(home.toFile().setWritable(false), "cannot make directory read-only");
+        try {
+            assumeFalse(Files.isWritable(home), "running with privileges that ignore permissions");
+            Path p = NativeLibLoader.cacheRoot(null, "Linux", null, home.toString(), tmp.toString());
+            assertEquals(tmp.resolve("typst-java"), p);
+        } finally {
+            home.toFile().setWritable(true);
+        }
+    }
+
+    @Test
+    void cacheRootUsesWritableCacheDirUnderReadOnlyHome(@TempDir Path tmp) throws Exception {
+        Path home = Files.createDirectory(tmp.resolve("ro-home"));
+        Files.createDirectory(home.resolve(".cache"));
+        assumeTrue(home.toFile().setWritable(false), "cannot make directory read-only");
+        try {
+            assumeFalse(Files.isWritable(home), "running with privileges that ignore permissions");
+            Path p = NativeLibLoader.cacheRoot(null, "Linux", null, home.toString(), tmp.toString());
+            assertEquals(home.resolve(".cache").resolve("typst-java"), p);
+        } finally {
+            home.toFile().setWritable(true);
+        }
+    }
+
+    @Test
+    void cacheRootOverrideTakesPrecedence(@TempDir Path home, @TempDir Path tmp) {
+        Path override = tmp.resolve("custom");
+        Path p = NativeLibLoader.cacheRoot(override.toString(), "Linux", null, home.toString(),
+                tmp.toString());
+        assertEquals(override, p);
     }
 
     @Test
