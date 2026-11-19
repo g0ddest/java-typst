@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+comemo = "0.5"
 typst = "0.15"
 typst-layout = "0.15"
 typst-pdf = "0.15"

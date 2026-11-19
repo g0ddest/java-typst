@@ -14,6 +14,11 @@ use crate::packages::ResolveFn;
 use crate::result::TypstResult;
 use crate::world::TypstJavaWorld;
 
+/// How many compilations a memoized result survives without being used again: long enough to keep
+/// what consecutive documents share (fonts, shaped text of a common template), short enough that
+/// what belonged to one document goes away. The Typst CLI uses the same figure between recompiles.
+const MEMOIZATION_MAX_AGE: usize = 10;
+
 /// The main engine that owns fonts, cache, and compiles templates.
 pub struct TypstJavaEngine {
     /// Shared font manager.
@@ -115,7 +120,7 @@ impl TypstJavaEngine {
         let warnings_json = diagnostics_to_json(&result.warnings, &world);
 
         // 7. Process output
-        match result.output {
+        let outcome = match result.output {
             Ok(document) => {
                 // Export to PDF
                 let options = PdfOptions::default();
@@ -131,7 +136,14 @@ impl TypstJavaEngine {
                 let errors_json = diagnostics_to_json(&errors, &world);
                 TypstResult::failure(errors_json, warnings_json)
             }
-        }
+        };
+
+        // Typst memoizes layout and export work in a process-wide cache that only shrinks when
+        // asked to. Without this every compilation of new input stays resident for the life of
+        // the host JVM, whichever engine made it and even after that engine is freed.
+        comemo::evict(MEMOIZATION_MAX_AGE);
+
+        outcome
     }
 
     /// Resolve the source text for a template, using the cache if enabled.

@@ -2456,6 +2456,7 @@ name = "typst-java"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "comemo",
  "dirs",
  "ecow",
  "flate2",
